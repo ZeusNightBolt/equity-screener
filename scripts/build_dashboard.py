@@ -111,6 +111,11 @@ with rsi_hist as (
     f.dolt_value_score,
     f.production_factor_score,
     f.quant_factor_score,
+    f.ret_1w_pct,
+    f.ret_1m_pct,
+    f.ret_3m_pct,
+    f.ret_6m_pct,
+    f.ret_ytd_pct,
     p.ts0,
     to_timestamp(p.ts0/1000) four_h_timestamp,
     p.close0 four_h_close,
@@ -135,11 +140,64 @@ select * from base
     return df
 
 
+def cap_by_sector(df: pd.DataFrame, score_col: str, limit: int, per_sector_cap: int = 3) -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
+    counts = {}
+    picks = []
+    for idx, row in df.sort_values(score_col, ascending=False).iterrows():
+        sector = str(row.get("sector", "Unknown"))
+        if counts.get(sector, 0) >= per_sector_cap:
+            continue
+        counts[sector] = counts.get(sector, 0) + 1
+        picks.append(idx)
+        if len(picks) >= limit:
+            break
+    return df.loc[picks].copy()
+
+
+def build_diversified_top10(df: pd.DataFrame, per_sector_cap: int = 3) -> pd.DataFrame:
+    """Blend multiple opportunity sleeves; do not let RSI monopolize the top 10."""
+    if df.empty:
+        return df.copy()
+    sector_counts = {}
+    picked = []
+    picked_set = set()
+
+    def add_from(frame: pd.DataFrame, score_col: str, quota: int) -> None:
+        nonlocal picked, picked_set, sector_counts
+        for idx, row in frame.sort_values(score_col, ascending=False).iterrows():
+            if idx in picked_set:
+                continue
+            sector = str(row.get("sector", "Unknown"))
+            if sector_counts.get(sector, 0) >= per_sector_cap:
+                continue
+            picked.append(idx)
+            picked_set.add(idx)
+            sector_counts[sector] = sector_counts.get(sector, 0) + 1
+            if len([i for i in picked if i in frame.index]) >= quota or len(picked) >= 10:
+                break
+
+    # 4 best all-around, 3 short/lows/peer-lag, 3 value-laggards. Fill any remaining by overall score.
+    add_from(df, "opportunity_score", 4)
+    add_from(df, "squeeze_laggard_score", 7)
+    add_from(df, "value_laggard_score", 10)
+    add_from(df, "opportunity_score", 10)
+    out = df.loc[picked[:10]].copy()
+    out["portfolio_rank"] = range(1, len(out) + 1)
+    return out
+
+
 def score_candidates(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
     for col in ["yf_forward_pe", "yf_trailing_pe", "yf_price_to_book", "yf_peg_ratio"]:
         df.loc[df[col].astype(float) <= 0, col] = np.nan
+
+    for col in ["short_pct_float", "from_52w_low_pct", "from_52w_high_pct", "ret_1w_pct", "ret_1m_pct", "ret_3m_pct", "ret_6m_pct", "ret_ytd_pct", "volume_vs_20d"]:
+        if col not in df.columns:
+            df[col] = np.nan
+        df[col] = pd.to_numeric(df[col], errors="coerce")
 
     if "dolt_value_score" in df.columns:
         df["dolt_value_norm"] = (df["dolt_value_score"].astype(float) * 10.0).where(df["dolt_value_score"].notna())
@@ -167,12 +225,41 @@ def score_candidates(df: pd.DataFrame) -> pd.DataFrame:
         0.0,
     )
     df["rsi_acceleration_score"] = (0.70 * df["rsi_accel_pct"] + 0.20 * df["rsi_delta_pct"] + df["grind_bonus"]).clip(0, 100)
-    df["opportunity_score"] = 0.65 * df["rsi_acceleration_score"] + 0.35 * df["composite_value_score"]
+    df["rsi_value_score"] = 0.65 * df["rsi_acceleration_score"] + 0.35 * df["composite_value_score"]
+
+    df["sector_ret_1m_median"] = df.groupby("sector")["ret_1m_pct"].transform("median")
+    df["sector_ret_3m_median"] = df.groupby("sector")["ret_3m_pct"].transform("median")
+    df["peer_lag_1m_pct"] = df["sector_ret_1m_median"] - df["ret_1m_pct"]
+    df["peer_lag_3m_pct"] = df["sector_ret_3m_median"] - df["ret_3m_pct"]
+    df["peer_lag_score"] = (0.65 * pct_score(df["peer_lag_1m_pct"], lower_is_better=False).fillna(50.0) + 0.35 * pct_score(df["peer_lag_3m_pct"], lower_is_better=False).fillna(50.0)).clip(0, 100)
+    df["peer_rally_laggard_flag"] = ((df["sector_ret_1m_median"] > 3.0) & (df["peer_lag_1m_pct"] > 5.0)).astype(int)
+
+    df["short_score"] = pct_score(df["short_pct_float"], lower_is_better=False).fillna(35.0)
+    df["near_low_score"] = pct_score(df["from_52w_low_pct"], lower_is_better=True).fillna(50.0)
+    df["oversold_not_broken_score"] = np.where(df["rsi0"].between(25, 55), 70.0, 40.0)
+    df["squeeze_laggard_score"] = (
+        0.35 * df["short_score"]
+        + 0.30 * df["near_low_score"]
+        + 0.25 * df["peer_lag_score"]
+        + 0.10 * df["oversold_not_broken_score"]
+        + np.where((df["peer_rally_laggard_flag"] == 1) & (df["short_pct_float"] >= 5), 10.0, 0.0)
+    ).clip(0, 100)
+    df["value_laggard_score"] = (0.45 * df["composite_value_score"] + 0.35 * df["peer_lag_score"] + 0.20 * df["near_low_score"]).clip(0, 100)
+
+    score_cols = ["rsi_value_score", "squeeze_laggard_score", "value_laggard_score"]
+    df["opportunity_score"] = df[score_cols].max(axis=1)
+    labels = {
+        "rsi_value_score": "RSI inflection + value",
+        "squeeze_laggard_score": "shorted near lows / peer lag",
+        "value_laggard_score": "cheap peer laggard",
+    }
+    df["primary_strategy"] = df[score_cols].idxmax(axis=1).map(labels)
     df["rank_in_sector"] = df.groupby("sector")["opportunity_score"].rank(method="first", ascending=False).astype(int)
     df["global_rank"] = df["opportunity_score"].rank(method="first", ascending=False).astype(int)
     df["is_top_inflection"] = (df["inflection_flag"] == 1) & (df["rsi_delta_1"] > 0) & (df["rsi_accel"] > 0)
+    diversified = cap_by_sector(df, "opportunity_score", 10, 3)
+    df["diversified_top10"] = df.index.isin(diversified.index)
     return df.sort_values("opportunity_score", ascending=False).reset_index(drop=True)
-
 
 def call_llm(prompt: str) -> str:
     deepseek_key = os.environ.get("DEEPSEEK_API_KEY")
@@ -225,11 +312,11 @@ def analyze_top_inflections(df: pd.DataFrame, top_n: int, force_refresh: bool) -
         except Exception:
             cache = {}
 
-    inflections = df[df["is_top_inflection"]].sort_values("opportunity_score", ascending=False).head(top_n)
+    candidates = build_diversified_top10(df, 3).head(top_n)
     analyses = []
-    for _, row in inflections.iterrows():
+    for _, row in candidates.iterrows():
         ticker = str(row["ticker"])
-        cache_key = f"{ticker}:{row['ts0']}:{round(float(row['opportunity_score']), 2)}"
+        cache_key = f"{ticker}:{row['ts0']}:{round(float(row['opportunity_score']), 2)}:{row.get('primary_strategy')}"
         cached = cache.get(ticker)
         if cached and cached.get("cache_key") == cache_key:
             analyses.append(cached)
@@ -239,27 +326,34 @@ def analyze_top_inflections(df: pd.DataFrame, top_n: int, force_refresh: bool) -
             "company": row.get("company"),
             "sector": row.get("sector"),
             "industry": row.get("industry"),
+            "primary_strategy": row.get("primary_strategy"),
             "price": round(float(row.get("four_h_close")), 4),
             "market_cap_bn": round(float(row.get("market_cap")) / 1e9, 2),
             "opportunity_score": round(float(row.get("opportunity_score")), 1),
+            "rsi_value_score": round(float(row.get("rsi_value_score")), 1),
+            "squeeze_laggard_score": round(float(row.get("squeeze_laggard_score")), 1),
+            "value_laggard_score": round(float(row.get("value_laggard_score")), 1),
             "composite_value_score": round(float(row.get("composite_value_score")), 1),
             "rsi_acceleration_score": round(float(row.get("rsi_acceleration_score")), 1),
             "rsi_current": round(float(row.get("rsi0")), 1),
             "rsi_delta_1": round(float(row.get("rsi_delta_1")), 1),
             "prior_rsi_delta_3_bar_avg": round(float(row.get("prior_delta_3_avg")), 1),
             "rsi_acceleration": round(float(row.get("rsi_accel")), 1),
+            "short_pct_float": None if pd.isna(row.get("short_pct_float")) else round(float(row.get("short_pct_float")), 1),
+            "from_52w_low_pct": None if pd.isna(row.get("from_52w_low_pct")) else round(float(row.get("from_52w_low_pct")), 1),
+            "from_52w_high_pct": None if pd.isna(row.get("from_52w_high_pct")) else round(float(row.get("from_52w_high_pct")), 1),
+            "ret_1m_pct": None if pd.isna(row.get("ret_1m_pct")) else round(float(row.get("ret_1m_pct")), 1),
+            "sector_ret_1m_median": None if pd.isna(row.get("sector_ret_1m_median")) else round(float(row.get("sector_ret_1m_median")), 1),
+            "peer_lag_1m_pct": None if pd.isna(row.get("peer_lag_1m_pct")) else round(float(row.get("peer_lag_1m_pct")), 1),
             "forward_pe": None if pd.isna(row.get("yf_forward_pe")) else round(float(row.get("yf_forward_pe")), 2),
             "trailing_pe": None if pd.isna(row.get("yf_trailing_pe")) else round(float(row.get("yf_trailing_pe")), 2),
             "price_to_book": None if pd.isna(row.get("yf_price_to_book")) else round(float(row.get("yf_price_to_book")), 2),
             "peg": None if pd.isna(row.get("yf_peg_ratio")) else round(float(row.get("yf_peg_ratio")), 2),
-            "from_52w_high_pct": None if pd.isna(row.get("from_52w_high_pct")) else round(float(row.get("from_52w_high_pct")), 1),
-            "from_52w_low_pct": None if pd.isna(row.get("from_52w_low_pct")) else round(float(row.get("from_52w_low_pct")), 1),
-            "short_pct_float": None if pd.isna(row.get("short_pct_float")) else round(float(row.get("short_pct_float")), 1),
             "sentiment_score": None if pd.isna(row.get("sentiment_score")) else round(float(row.get("sentiment_score")), 2),
         }
         prompt = (
             "Analyze this candidate as a possible LONG setup for a research dashboard. "
-            "Use the RSI acceleration inflection as the main signal, then value as confirmation. "
+            "Do not force an RSI-only story. Use the named primary strategy and supplied data: RSI inflection if present, but also short interest, proximity to 52-week lows, valuation, peer/sector lag, and whether peers have recently rallied. "
             "Return exactly 5 bullets with labels: Setup, Why it can work, What can break it, Confirming evidence to watch, Bottom line. "
             "Be specific and skeptical. No trade recommendation, no target price. Supplied data:\n"
             + json.dumps(payload, indent=2)
@@ -277,7 +371,6 @@ def analyze_top_inflections(df: pd.DataFrame, top_n: int, force_refresh: bool) -
     cache_path.write_text(json.dumps(analyses, indent=2, default=str))
     return analyses
 
-
 def clean_float(value):
     if value is None:
         return None
@@ -292,15 +385,18 @@ def clean_float(value):
 def record(row) -> dict:
     keys = [
         "global_rank", "rank_in_sector", "sector", "ticker", "company", "market_cap", "four_h_close",
-        "opportunity_score", "rsi_acceleration_score", "composite_value_score", "rsi0", "rsi_delta_1",
+        "opportunity_score", "rsi_value_score", "squeeze_laggard_score", "value_laggard_score",
+        "rsi_acceleration_score", "composite_value_score", "rsi0", "rsi_delta_1",
         "prior_delta_3_avg", "rsi_accel", "inflection_flag", "yf_forward_pe", "yf_trailing_pe",
         "yf_price_to_book", "yf_peg_ratio", "from_52w_high_pct", "from_52w_low_pct", "short_pct_float",
-        "sentiment_score", "value_grade", "growth_grade", "momentum_grade", "four_h_timestamp",
+        "ret_1m_pct", "ret_3m_pct", "sector_ret_1m_median", "peer_lag_1m_pct", "peer_lag_3m_pct",
+        "near_low_score", "short_score", "peer_lag_score", "sentiment_score", "value_grade",
+        "growth_grade", "momentum_grade", "primary_strategy", "four_h_timestamp",
     ]
     out = {}
     for key in keys:
         value = row.get(key)
-        if key in {"sector", "ticker", "company", "value_grade", "growth_grade", "momentum_grade"}:
+        if key in {"sector", "ticker", "company", "value_grade", "growth_grade", "momentum_grade", "primary_strategy"}:
             out[key] = None if pd.isna(value) else str(value)
         elif key == "four_h_timestamp":
             out[key] = str(value)
@@ -339,9 +435,12 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     now_et = dt.datetime.now().astimezone()
     latest_ts = str(df["four_h_timestamp"].max()) if not df.empty else "unknown"
-    top = df.sort_values("opportunity_score", ascending=False).head(25)
+    diversified_top = build_diversified_top10(df, 3)
+    top = cap_by_sector(df, "opportunity_score", 25, 3)
     top_sector = df[df["rank_in_sector"] <= 5].sort_values(["sector", "rank_in_sector"])
-    inflect = df[df["is_top_inflection"]].sort_values("opportunity_score", ascending=False).head(15)
+    inflect = cap_by_sector(df[df["is_top_inflection"]], "rsi_value_score", 15, 3)
+    squeeze = cap_by_sector(df.sort_values("squeeze_laggard_score", ascending=False), "squeeze_laggard_score", 15, 3)
+    laggards = cap_by_sector(df.sort_values("value_laggard_score", ascending=False), "value_laggard_score", 15, 3)
 
     payload = {
         "generated_at": now_et.isoformat(),
@@ -349,32 +448,45 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
         "price_filter": price_filter,
         "universe_count": int(len(df)),
         "sector_count": int(df["sector"].nunique()) if not df.empty else 0,
+        "top_diversified": [record(r) for _, r in diversified_top.iterrows()],
         "top": [record(r) for _, r in top.iterrows()],
         "inflections": [record(r) for _, r in inflect.iterrows()],
+        "squeeze_laggards": [record(r) for _, r in squeeze.iterrows()],
+        "value_laggards": [record(r) for _, r in laggards.iterrows()],
         "by_sector": [record(r) for _, r in top_sector.iterrows()],
         "llm_analysis": analyses,
     }
     (DATA_DIR / "dashboard_data.json").write_text(json.dumps(payload, indent=2, default=str))
     (DOCS_DIR / "dashboard_data.json").write_text(json.dumps(payload, indent=2, default=str))
 
-    rows = []
-    for _, r in top.iterrows():
-        rows.append(
+    def row_html(r, rank_field="global_rank"):
+        return (
             "<tr>"
-            f"<td>{int(r['global_rank'])}</td>"
+            f"<td>{int(r[rank_field]) if rank_field in r and not pd.isna(r[rank_field]) else ''}</td>"
             f"<td><strong>{html.escape(str(r['ticker']))}</strong><small>{html.escape(str(r['company'])[:42])}</small></td>"
-            f"<td>{html.escape(str(r['sector']))}</td>"
+            f"<td>{html.escape(str(r['sector']))}<small>{html.escape(str(r.get('primary_strategy', '')))}</small></td>"
             f"<td>{fmt_money(r['four_h_close'])}</td>"
             f"<td>{fmt_bn(r['market_cap'])}</td>"
             f"<td>{render_bar(r['opportunity_score'])}</td>"
-            f"<td>{render_bar(r['rsi_acceleration_score'], 'hot')}</td>"
-            f"<td>{fmt_num(r['rsi_accel'])}</td>"
-            f"<td>{fmt_num(r['rsi_delta_1'])}</td>"
-            f"<td>{fmt_num(r['prior_delta_3_avg'])}</td>"
-            f"<td>{render_bar(r['composite_value_score'], 'value')}</td>"
-            f"<td>{'YES' if int(r['inflection_flag']) == 1 else 'NO'}</td>"
+            f"<td>{render_bar(r.get('rsi_value_score'), 'hot')}</td>"
+            f"<td>{render_bar(r.get('squeeze_laggard_score'), 'short')}</td>"
+            f"<td>{render_bar(r.get('value_laggard_score'), 'value')}</td>"
+            f"<td>{fmt_num(r.get('short_pct_float'))}%</td>"
+            f"<td>{fmt_num(r.get('from_52w_low_pct'))}%</td>"
+            f"<td>{fmt_num(r.get('peer_lag_1m_pct'))}%</td>"
+            f"<td>{fmt_num(r.get('rsi_accel'))}</td>"
             "</tr>"
         )
+
+    top_rows = [row_html(r) for _, r in top.iterrows()]
+    div_rows = []
+    for display_rank, (_, r) in enumerate(diversified_top.iterrows(), 1):
+        rr = r.copy()
+        rr["display_rank"] = display_rank
+        div_rows.append(row_html(rr, "display_rank"))
+    inflect_rows = [row_html(r) for _, r in inflect.iterrows()]
+    squeeze_rows = [row_html(r) for _, r in squeeze.iterrows()]
+    laggard_rows = [row_html(r) for _, r in laggards.iterrows()]
 
     analysis_cards = []
     for item in analyses:
@@ -383,7 +495,7 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
         analysis_cards.append(
             f"<article class='card'><div class='card-head'><span>{html.escape(item['ticker'])}</span>"
             f"<em>{html.escape(str(inp.get('sector')))} · ${inp.get('price')}</em></div>"
-            f"<div class='metrics'>Score {inp.get('opportunity_score')} · RSI accel {inp.get('rsi_acceleration')} · Value {inp.get('composite_value_score')}</div>"
+            f"<div class='metrics'>{html.escape(str(inp.get('primary_strategy')))} · Score {inp.get('opportunity_score')} · short {inp.get('short_pct_float')}% · peer lag {inp.get('peer_lag_1m_pct')}%</div>"
             f"<p>{text}</p></article>"
         )
 
@@ -393,26 +505,30 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
         for _, r in sdf.iterrows():
             items.append(
                 f"<li><b>{html.escape(str(r['ticker']))}</b> {fmt_money(r['four_h_close'])} "
-                f"score {fmt_num(r['opportunity_score'])} · RSI accel {fmt_num(r['rsi_accel'])} · value {fmt_num(r['composite_value_score'])}</li>"
+                f"score {fmt_num(r['opportunity_score'])} · {html.escape(str(r.get('primary_strategy')))} · short {fmt_num(r.get('short_pct_float'))}% · lag {fmt_num(r.get('peer_lag_1m_pct'))}%</li>"
             )
         sector_sections.append(f"<section class='sector'><h3>{html.escape(str(sector))}</h3><ol>{''.join(items)}</ol></section>")
 
+    header = "<table><thead><tr><th>#</th><th>Ticker</th><th>Sector / Sleeve</th><th>4h Px</th><th>MCap</th><th>Opp</th><th>RSI</th><th>Short/Lows</th><th>Value/Lag</th><th>Short</th><th>From Low</th><th>Peer Lag 1M</th><th>RSI Accel</th></tr></thead><tbody>"
     css = """
-:root{--bg:#080808;--panel:#101010;--panel2:#151515;--text:#e8e4d8;--muted:#8a867b;--line:#2a2822;--amber:#e6b422;--green:#40c463;--red:#ff5c5c}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:'JetBrains Mono','SFMono-Regular',Consolas,monospace;font-size:13px}header{border-bottom:1px solid var(--line);padding:18px 22px;background:#0d0d0d;position:sticky;top:0;z-index:2}h1{font-size:18px;margin:0 0 8px;color:var(--amber);letter-spacing:.04em}h2{font-size:15px;margin:28px 0 12px;color:var(--amber);text-transform:uppercase}h3{font-size:13px;color:var(--amber)}.status{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted)}.dot{color:var(--green)}main{padding:18px 22px;max-width:1500px;margin:0 auto}.note{border:1px solid var(--line);padding:12px;background:var(--panel);color:var(--muted);line-height:1.5}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:12px}.card,.sector{border:1px solid var(--line);background:var(--panel);padding:12px}.card-head{display:flex;justify-content:space-between;border-bottom:1px solid var(--line);padding-bottom:8px;margin-bottom:8px}.card-head span{color:var(--amber);font-size:16px;font-weight:bold}.card-head em{font-style:normal;color:var(--muted)}.metrics{color:var(--green);margin-bottom:8px}.card p{line-height:1.55;margin:0;color:#d8d2c3}table{width:100%;border-collapse:collapse;background:var(--panel)}th,td{border:1px solid var(--line);padding:8px;text-align:left;vertical-align:top}th{color:var(--amber);font-weight:600;background:#0e0e0e;position:sticky;top:76px}td small{display:block;color:var(--muted);font-size:11px;margin-top:3px}.bar{display:inline-block;width:82px;height:7px;background:#242018;margin-right:8px;vertical-align:middle}.bar i{display:block;height:100%;background:var(--amber)}.bar.hot i{background:var(--green)}.bar.value i{background:#b58cff}.sector ol{margin:0;padding-left:22px}.sector li{margin:6px 0;line-height:1.45}.footer{color:var(--muted);font-size:11px;margin:28px 0}.pill{border:1px solid var(--line);padding:3px 6px;color:var(--amber);display:inline-block;margin-right:6px}a{color:var(--amber)}
+:root{--bg:#080808;--panel:#101010;--panel2:#151515;--text:#e8e4d8;--muted:#8a867b;--line:#2a2822;--amber:#e6b422;--green:#40c463;--red:#ff5c5c;--purple:#b58cff;--cyan:#47d7ff}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:'JetBrains Mono','SFMono-Regular',Consolas,monospace;font-size:13px}header{border-bottom:1px solid var(--line);padding:18px 22px;background:#0d0d0d;position:sticky;top:0;z-index:2}h1{font-size:18px;margin:0 0 8px;color:var(--amber);letter-spacing:.04em}h2{font-size:15px;margin:28px 0 12px;color:var(--amber);text-transform:uppercase}h3{font-size:13px;color:var(--amber)}.status{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted)}.dot{color:var(--green)}main{padding:18px 22px;max-width:1600px;margin:0 auto}.note{border:1px solid var(--line);padding:12px;background:var(--panel);color:var(--muted);line-height:1.5}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:12px}.card,.sector{border:1px solid var(--line);background:var(--panel);padding:12px}.card-head{display:flex;justify-content:space-between;border-bottom:1px solid var(--line);padding-bottom:8px;margin-bottom:8px}.card-head span{color:var(--amber);font-size:16px;font-weight:bold}.card-head em{font-style:normal;color:var(--muted)}.metrics{color:var(--green);margin-bottom:8px}.card p{line-height:1.55;margin:0;color:#d8d2c3}table{width:100%;border-collapse:collapse;background:var(--panel)}th,td{border:1px solid var(--line);padding:8px;text-align:left;vertical-align:top}th{color:var(--amber);font-weight:600;background:#0e0e0e;position:sticky;top:76px}td small{display:block;color:var(--muted);font-size:11px;margin-top:3px}.bar{display:inline-block;width:74px;height:7px;background:#242018;margin-right:8px;vertical-align:middle}.bar i{display:block;height:100%;background:var(--amber)}.bar.hot i{background:var(--green)}.bar.value i{background:var(--purple)}.bar.short i{background:var(--cyan)}.sector ol{margin:0;padding-left:22px}.sector li{margin:6px 0;line-height:1.45}.footer{color:var(--muted);font-size:11px;margin:28px 0}.pill{border:1px solid var(--line);padding:3px 6px;color:var(--amber);display:inline-block;margin-right:6px}a{color:var(--amber)}
 """
     content = f"""<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>RSI Value Opportunities</title><style>{css}</style></head>
-<body><header><h1>RSI VALUE OPPORTUNITIES</h1><div class="status"><span class="dot">● LIVE</span><span>generated {html.escape(now_et.strftime('%Y-%m-%d %H:%M %Z'))}</span><span>latest 4h {html.escape(latest_ts)}</span><span>price &lt; ${price_filter:.0f}</span><span>{len(df)} names / {df['sector'].nunique() if not df.empty else 0} sectors</span></div></header>
+<body><header><h1>MULTI-SLEEVE VALUE OPPORTUNITIES</h1><div class="status"><span class="dot">● LIVE</span><span>generated {html.escape(now_et.strftime('%Y-%m-%d %H:%M %Z'))}</span><span>latest 4h {html.escape(latest_ts)}</span><span>price &lt; ${price_filter:.0f}</span><span>{len(df)} names / {df['sector'].nunique() if not df.empty else 0} sectors</span><span>top 10 capped at max 3/sector</span></div></header>
 <main>
-<div class="note"><span class="pill">Method</span> Score = 65% 4h RSI acceleration + 35% composite value. Inflection is favored when current 4h RSI delta flips positive after the prior 3-bar RSI trend was grinding lower. This is research only, not investment advice. LLM notes are qualitative commentary, not source data.</div>
-<h2>DeepSeek long setup review: top inflection candidates</h2><div class="grid">{''.join(analysis_cards)}</div>
-<h2>Top 25 ranked opportunities</h2><table><thead><tr><th>#</th><th>Ticker</th><th>Sector</th><th>4h Px</th><th>MCap</th><th>Opp</th><th>RSI Sig</th><th>RSI Accel</th><th>RSI Δ</th><th>Prior Grind</th><th>Value</th><th>Inflect</th></tr></thead><tbody>{''.join(rows)}</tbody></table>
+<div class="note"><span class="pill">Method</span> Multi-sleeve rank: RSI inflection + value, shorted-near-lows / peer lag, and cheap peer laggards. The top 10 blends three sleeves and is diversified with a hard cap of 3 stocks per sector. Known numeric data comes from the local Polygon/DuckDB warehouse; LLM notes are qualitative research commentary, not investment advice.</div>
+<h2>Multi-sleeve top 10 opportunities</h2>{header}{''.join(div_rows)}</tbody></table>
+<h2>DeepSeek review: diversified top 10</h2><div class="grid">{''.join(analysis_cards)}</div>
+<h2>RSI inflection sleeve</h2>{header}{''.join(inflect_rows)}</tbody></table>
+<h2>Shorted near lows / peer lag sleeve</h2>{header}{''.join(squeeze_rows)}</tbody></table>
+<h2>Cheap peer laggard sleeve</h2>{header}{''.join(laggard_rows)}</tbody></table>
+<h2>Top 25 diversified ranked opportunities</h2>{header}{''.join(top_rows)}</tbody></table>
 <h2>Top by sector</h2><div class="grid">{''.join(sector_sections)}</div>
-<div class="footer">Known: numeric data from local Polygon/DuckDB warehouse. Estimated: composite value score from warehouse enrichment fields and cross-sectional ranks. Unknown: forward catalysts beyond supplied warehouse fields unless noted by LLM as unknown.</div>
+<div class="footer">Known: numeric data from local Polygon/DuckDB warehouse. Estimated: composite scores from normalized warehouse fields. Unknown: forward catalysts beyond supplied warehouse fields unless LLM explicitly labels them unknown.</div>
 </main></body></html>"""
     (DOCS_DIR / "index.html").write_text(content)
-
 
 def git_commit_push() -> None:
     subprocess.run(["git", "add", "README.md", ".gitignore", "run_daily.sh", "scripts/build_dashboard.py", "docs/index.html", "docs/dashboard_data.json", "data/dashboard_data.json", "data/llm_analysis.json"], cwd=PROJECT_DIR, check=True)
