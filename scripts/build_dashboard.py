@@ -119,6 +119,7 @@ with rsi_hist as (
     e.momentum_grade,
     f.dolt_value_score,
     f.production_factor_score,
+    f.production_factor_basket,
     f.quant_factor_score,
     f.ret_1w_pct,
     f.ret_1m_pct,
@@ -399,14 +400,15 @@ def record(row) -> dict:
         "rsi_acceleration_score", "composite_value_score", "rsi0", "rsi_delta_1",
         "prior_delta_3_avg", "rsi_accel", "inflection_flag", "yf_forward_pe", "yf_trailing_pe",
         "yf_price_to_book", "yf_peg_ratio", "from_52w_high_pct", "from_52w_low_pct", "short_pct_float",
-        "ret_1m_pct", "ret_3m_pct", "sector_ret_1m_median", "peer_lag_1m_pct", "peer_lag_3m_pct",
+        "ret_1w_pct", "ret_1m_pct", "ret_3m_pct", "ret_6m_pct", "ret_ytd_pct",
+        "sector_ret_1m_median", "peer_lag_1m_pct", "peer_lag_3m_pct",
         "near_low_score", "short_score", "peer_lag_score", "sentiment_score", "value_grade",
-        "growth_grade", "momentum_grade", "primary_strategy", "four_h_timestamp",
+        "growth_grade", "momentum_grade", "primary_strategy", "production_factor_basket", "production_factor_score", "four_h_timestamp",
     ]
     out = {}
     for key in keys:
         value = row.get(key)
-        if key in {"sector", "ticker", "company", "value_grade", "growth_grade", "momentum_grade", "primary_strategy"}:
+        if key in {"sector", "ticker", "company", "value_grade", "growth_grade", "momentum_grade", "primary_strategy", "production_factor_basket"}:
             out[key] = None if pd.isna(value) else str(value)
         elif key == "four_h_timestamp":
             out[key] = str(value)
@@ -448,6 +450,66 @@ def ticker_link(ticker: str, cls: str = "ticker-link") -> str:
     safe_ticker = html.escape(str(ticker).strip().upper())
     safe_href = html.escape(finviz_url(ticker), quote=True)
     return f'<a class="{cls}" href="{safe_href}" target="_blank" rel="noopener noreferrer">{safe_ticker}</a>'
+
+
+def factor_basket_analysis(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if df.empty or "production_factor_basket" not in df.columns:
+        return pd.DataFrame(), pd.DataFrame()
+    work = df[df["production_factor_basket"].notna()].copy()
+    if work.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    g = work.groupby("production_factor_basket", dropna=True)
+    baskets = g.agg(
+        ticker_count=("ticker", "count"),
+        avg_opportunity_score=("opportunity_score", "mean"),
+        avg_factor_score=("production_factor_score", "mean"),
+        avg_value_score=("composite_value_score", "mean"),
+        avg_ret_1w_pct=("ret_1w_pct", "mean"),
+        avg_ret_1m_pct=("ret_1m_pct", "mean"),
+        avg_ret_3m_pct=("ret_3m_pct", "mean"),
+        avg_ret_ytd_pct=("ret_ytd_pct", "mean"),
+        avg_rsi=("rsi0", "mean"),
+        avg_rsi_delta_1=("rsi_delta_1", "mean"),
+        avg_rsi_accel=("rsi_accel", "mean"),
+        inflection_count=("is_top_inflection", "sum"),
+    ).reset_index().rename(columns={"production_factor_basket": "basket_name"})
+    baskets = baskets[baskets["ticker_count"] >= 3].copy()
+    if baskets.empty:
+        return baskets, pd.DataFrame()
+    baskets["lag_score"] = (
+        np.maximum(0, -baskets["avg_ret_1m_pct"].fillna(0))
+        + 0.50 * np.maximum(0, -baskets["avg_ret_3m_pct"].fillna(0))
+        + 0.25 * np.maximum(0, -baskets["avg_ret_ytd_pct"].fillna(0))
+    )
+    baskets["inflection_score"] = (
+        4.0 * np.maximum(0, baskets["avg_rsi_delta_1"].fillna(0))
+        + 2.0 * np.maximum(0, baskets["avg_rsi_accel"].fillna(0))
+        + 0.5 * np.maximum(0, baskets["avg_ret_1w_pct"].fillna(0))
+        + 3.0 * baskets["inflection_count"].fillna(0) / baskets["ticker_count"].clip(lower=1)
+    )
+    baskets["is_lagged"] = (
+        (baskets["avg_ret_1m_pct"].fillna(0) < 0)
+        | (baskets["avg_ret_3m_pct"].fillna(0) < 0)
+        | (baskets["avg_ret_ytd_pct"].fillna(0) < 0)
+    )
+    baskets["factor_reversal_score"] = (
+        0.60 * pct_score(baskets["lag_score"], lower_is_better=False).fillna(50)
+        + 0.40 * pct_score(baskets["inflection_score"], lower_is_better=False).fillna(50)
+    )
+    # The selected factor must be a true laggard; non-lagged baskets stay visible but cannot win.
+    baskets["display_score"] = np.where(baskets["is_lagged"], baskets["factor_reversal_score"], baskets["factor_reversal_score"] * 0.25)
+    baskets = baskets.sort_values(["display_score", "factor_reversal_score"], ascending=False).reset_index(drop=True)
+    baskets["rank"] = baskets.index + 1
+    target_basket = baskets[baskets["is_lagged"]].iloc[0]["basket_name"] if baskets["is_lagged"].any() else baskets.iloc[0]["basket_name"]
+    opps = work[work["production_factor_basket"] == target_basket].copy()
+    opps["factor_opportunity_score"] = (
+        0.35 * opps["rsi_value_score"].fillna(50)
+        + 0.25 * opps["composite_value_score"].fillna(50)
+        + 0.20 * opps["production_factor_score"].fillna(opps["production_factor_score"].median()) * 10.0
+        + 0.20 * opps["peer_lag_score"].fillna(50)
+    ).clip(0, 100)
+    opps = cap_by_sector(opps.sort_values("factor_opportunity_score", ascending=False), "factor_opportunity_score", 20, 4)
+    return baskets, opps
 
 
 def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float) -> None:
@@ -530,13 +592,33 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
         sector_sections.append(f"<section class='sector'><h3>{html.escape(str(sector))}</h3><ol>{''.join(items)}</ol></section>")
 
     header = "<table><thead><tr><th>#</th><th>Ticker</th><th>Sector / Sleeve</th><th>4h Px</th><th>MCap</th><th>Opp</th><th>RSI</th><th>Short/Lows</th><th>Value/Lag</th><th>Short</th><th>From Low</th><th>Peer Lag 1M</th><th>RSI Accel</th></tr></thead><tbody>"
+
+    factor_baskets, factor_opps = factor_basket_analysis(df)
+    factor_rows = []
+    selected_basket = "none"
+    if not factor_baskets.empty:
+        selected_basket = str(factor_baskets.iloc[0]["basket_name"])
+        for _, b in factor_baskets.iterrows():
+            cls = " class='selected'" if str(b["basket_name"]) == selected_basket else ""
+            factor_rows.append(
+                f"<tr{cls}><td>{int(b['rank'])}</td><td><strong>{html.escape(str(b['basket_name']))}</strong><small>{int(b['ticker_count'])} names under ${price_filter:.0f}</small></td>"
+                f"<td>{render_bar(b['factor_reversal_score'])}</td><td>{fmt_num(b['avg_ret_1w_pct'])}%</td><td>{fmt_num(b['avg_ret_1m_pct'])}%</td><td>{fmt_num(b['avg_ret_3m_pct'])}%</td>"
+                f"<td>{fmt_num(b['avg_rsi'])}</td><td>{fmt_num(b['avg_rsi_delta_1'])}</td><td>{fmt_num(b['avg_rsi_accel'])}</td><td>{int(b['inflection_count'])}</td></tr>"
+            )
+    factor_opp_rows = []
+    if not factor_opps.empty:
+        for display_rank, (_, r) in enumerate(factor_opps.iterrows(), 1):
+            rr = r.copy()
+            rr["display_rank"] = display_rank
+            factor_opp_rows.append(row_html(rr, "display_rank"))
+
     css = """
-:root{--bg:#080808;--panel:#101010;--panel2:#151515;--text:#e8e4d8;--muted:#8a867b;--line:#2a2822;--amber:#e6b422;--green:#40c463;--red:#ff5c5c;--purple:#b58cff;--cyan:#47d7ff}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:'JetBrains Mono','SFMono-Regular',Consolas,monospace;font-size:13px}header{border-bottom:1px solid var(--line);padding:18px 22px;background:#0d0d0d;position:sticky;top:0;z-index:2}h1{font-size:18px;margin:0 0 8px;color:var(--amber);letter-spacing:.04em}h2{font-size:15px;margin:28px 0 12px;color:var(--amber);text-transform:uppercase}h3{font-size:13px;color:var(--amber)}.status{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted)}.dot{color:var(--green)}main{padding:18px 22px;max-width:1600px;margin:0 auto}.note{border:1px solid var(--line);padding:12px;background:var(--panel);color:var(--muted);line-height:1.5}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:12px}.card,.sector{border:1px solid var(--line);background:var(--panel);padding:12px}.card-head{display:flex;justify-content:space-between;border-bottom:1px solid var(--line);padding-bottom:8px;margin-bottom:8px}.card-head span{color:var(--amber);font-size:16px;font-weight:bold}.card-head em{font-style:normal;color:var(--muted)}.metrics{color:var(--green);margin-bottom:8px}.card p{line-height:1.55;margin:0;color:#d8d2c3}table{width:100%;border-collapse:collapse;background:var(--panel)}th,td{border:1px solid var(--line);padding:8px;text-align:left;vertical-align:top}th{color:var(--amber);font-weight:600;background:#0e0e0e;position:sticky;top:76px}td small{display:block;color:var(--muted);font-size:11px;margin-top:3px}a.ticker-link{color:var(--amber);text-decoration:none;border-bottom:1px solid rgba(230,180,34,.45)}a.ticker-link:hover{color:var(--green);border-bottom-color:var(--green)}.bar{display:inline-block;width:74px;height:7px;background:#242018;margin-right:8px;vertical-align:middle}.bar i{display:block;height:100%;background:var(--amber)}.bar.hot i{background:var(--green)}.bar.value i{background:var(--purple)}.bar.short i{background:var(--cyan)}.sector ol{margin:0;padding-left:22px}.sector li{margin:6px 0;line-height:1.45}.footer{color:var(--muted);font-size:11px;margin:28px 0}.pill{border:1px solid var(--line);padding:3px 6px;color:var(--amber);display:inline-block;margin-right:6px}a{color:var(--amber)}
+:root{--bg:#080808;--panel:#101010;--panel2:#151515;--text:#e8e4d8;--muted:#8a867b;--line:#2a2822;--amber:#e6b422;--green:#40c463;--red:#ff5c5c;--purple:#b58cff;--cyan:#47d7ff}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:'JetBrains Mono','SFMono-Regular',Consolas,monospace;font-size:13px}header{border-bottom:1px solid var(--line);padding:18px 22px;background:#0d0d0d;position:sticky;top:0;z-index:2}h1{font-size:18px;margin:0 0 8px;color:var(--amber);letter-spacing:.04em}h2{font-size:15px;margin:28px 0 12px;color:var(--amber);text-transform:uppercase}h3{font-size:13px;color:var(--amber)}.status{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted)}.dot{color:var(--green)}main{padding:18px 22px;max-width:1600px;margin:0 auto}.note{border:1px solid var(--line);padding:12px;background:var(--panel);color:var(--muted);line-height:1.5}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:12px}.card,.sector{border:1px solid var(--line);background:var(--panel);padding:12px}.card-head{display:flex;justify-content:space-between;border-bottom:1px solid var(--line);padding-bottom:8px;margin-bottom:8px}.card-head span{color:var(--amber);font-size:16px;font-weight:bold}.card-head em{font-style:normal;color:var(--muted)}.metrics{color:var(--green);margin-bottom:8px}.card p{line-height:1.55;margin:0;color:#d8d2c3}table{width:100%;border-collapse:collapse;background:var(--panel)}th,td{border:1px solid var(--line);padding:8px;text-align:left;vertical-align:top}th{color:var(--amber);font-weight:600;background:#0e0e0e;position:sticky;top:76px}td small{display:block;color:var(--muted);font-size:11px;margin-top:3px}a.ticker-link{color:var(--amber);text-decoration:none;border-bottom:1px solid rgba(230,180,34,.45)}a.ticker-link:hover{color:var(--green);border-bottom-color:var(--green)}.nav{display:flex;gap:10px;margin-top:10px}.nav a{border:1px solid var(--line);padding:6px 8px;text-decoration:none}.nav a.active{color:#080808;background:var(--amber)}tr.selected td{background:#171203}.bar{display:inline-block;width:74px;height:7px;background:#242018;margin-right:8px;vertical-align:middle}.bar i{display:block;height:100%;background:var(--amber)}.bar.hot i{background:var(--green)}.bar.value i{background:var(--purple)}.bar.short i{background:var(--cyan)}.sector ol{margin:0;padding-left:22px}.sector li{margin:6px 0;line-height:1.45}.footer{color:var(--muted);font-size:11px;margin:28px 0}.pill{border:1px solid var(--line);padding:3px 6px;color:var(--amber);display:inline-block;margin-right:6px}a{color:var(--amber)}
 """
     content = f"""<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>RSI Value Opportunities</title><style>{css}</style></head>
-<body><header><h1>MULTI-SLEEVE VALUE OPPORTUNITIES</h1><div class="status"><span class="dot">● LIVE</span><span>generated {html.escape(now_et.strftime('%Y-%m-%d %H:%M %Z'))}</span><span>latest 4h {html.escape(latest_ts)}</span><span>price &lt; ${price_filter:.0f}</span><span>{len(df)} names / {df['sector'].nunique() if not df.empty else 0} sectors</span><span>top 10 capped at max 3/sector</span></div></header>
+<body><header><h1>MULTI-SLEEVE VALUE OPPORTUNITIES</h1><div class="status"><span class="dot">● LIVE</span><span>generated {html.escape(now_et.strftime('%Y-%m-%d %H:%M %Z'))}</span><span>latest 4h {html.escape(latest_ts)}</span><span>price &lt; ${price_filter:.0f}</span><span>{len(df)} names / {df['sector'].nunique() if not df.empty else 0} sectors</span><span>top 10 capped at max 3/sector</span></div><nav class="nav"><a class="active" href="index.html">Opportunities</a><a href="factor-baskets.html">Factor basket inflections</a></nav></header>
 <main>
 <div class="note"><span class="pill">Method</span> Multi-sleeve rank: RSI inflection + value, shorted-near-lows / peer lag, and cheap peer laggards. The top 10 blends three sleeves and is diversified with a hard cap of 3 stocks per sector. Known numeric data comes from the local Polygon/DuckDB warehouse; LLM notes are qualitative research commentary, not investment advice.</div>
 <h2>Multi-sleeve top 10 opportunities</h2>{header}{''.join(div_rows)}</tbody></table>
@@ -548,10 +630,22 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
 <h2>Top by sector</h2><div class="grid">{''.join(sector_sections)}</div>
 <div class="footer">Known: numeric data from local Polygon/DuckDB warehouse. Estimated: composite scores from normalized warehouse fields. Unknown: forward catalysts beyond supplied warehouse fields unless LLM explicitly labels them unknown.</div>
 </main></body></html>"""
+    factor_header = "<table><thead><tr><th>#</th><th>Factor basket</th><th>Reversal</th><th>1W</th><th>1M</th><th>3M</th><th>RSI</th><th>RSI Δ1</th><th>RSI Accel</th><th>Inflect Names</th></tr></thead><tbody>"
+    factor_content = f"""<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Factor Basket Inflections</title><style>{css}</style></head>
+<body><header><h1>FACTOR BASKET LAGGARDS + INFLECTIONS</h1><div class="status"><span class="dot">● LIVE</span><span>generated {html.escape(now_et.strftime('%Y-%m-%d %H:%M %Z'))}</span><span>price &lt; ${price_filter:.0f}</span><span>selected basket: {html.escape(selected_basket)}</span></div><nav class="nav"><a href="index.html">Opportunities</a><a class="active" href="factor-baskets.html">Factor basket inflections</a></nav></header>
+<main>
+<div class="note"><span class="pill">Method</span> First rank production factor baskets by lag plus latest 4h RSI/return inflection. Lag is negative 1M/3M/YTD momentum; inflection is positive latest 4h RSI delta/acceleration plus 1W stabilization. Then show the best sub-${price_filter:.0f} names inside the highest-ranked lagging factor basket.</div>
+<h2>Factor basket score + momentum analysis</h2>{factor_header}{''.join(factor_rows)}</tbody></table>
+<h2>Best opportunities within selected lagging / inflecting factor: {html.escape(selected_basket)}</h2>{header}{''.join(factor_opp_rows)}</tbody></table>
+<div class="footer">Known: basket membership, prices, technicals, returns, and factor scores from local Polygon/DuckDB warehouse. Estimated: reversal score is a deterministic composite of basket lag and short-term inflection.</div>
+</main></body></html>"""
+    (DOCS_DIR / "factor-baskets.html").write_text(factor_content)
     (DOCS_DIR / "index.html").write_text(content)
 
 def git_commit_push() -> None:
-    subprocess.run(["git", "add", "README.md", ".gitignore", "run_daily.sh", "scripts/build_dashboard.py", "docs/index.html", "docs/dashboard_data.json", "data/dashboard_data.json", "data/llm_analysis.json", "data/scored_candidates.csv"], cwd=PROJECT_DIR, check=True)
+    subprocess.run(["git", "add", "README.md", ".gitignore", "run_daily.sh", "scripts/build_dashboard.py", "docs/index.html", "docs/factor-baskets.html", "docs/dashboard_data.json", "data/dashboard_data.json", "data/llm_analysis.json", "data/scored_candidates.csv"], cwd=PROJECT_DIR, check=True)
     status = subprocess.run(["git", "status", "--porcelain"], cwd=PROJECT_DIR, text=True, capture_output=True, check=True).stdout.strip()
     if not status:
         print("git: no changes to commit")
@@ -564,7 +658,7 @@ def git_commit_push() -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--price-filter", type=float, default=30.0)
+    parser.add_argument("--price-filter", type=float, default=50.0)
     parser.add_argument("--top-llm", type=int, default=10)
     parser.add_argument("--no-llm", action="store_true")
     parser.add_argument("--force-llm", action="store_true")

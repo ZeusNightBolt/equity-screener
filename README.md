@@ -4,14 +4,14 @@ Daily dashboard for low-priced, $5B+ market-cap stocks ranked by:
 
 - Composite value score from local Polygon/DuckDB warehouse enrichment fields.
 - 4-hour RSI acceleration, weighted highest when RSI inflects from a prior grind lower into a sharp rise.
-- Price filter: latest 4-hour close below `$30`.
+- Price filter: latest 4-hour close below `$50`.
 
 The dashboard is generated locally from `~/market-data/market_data.duckdb` and deployed as a static GitHub Pages site from `docs/`.
 
 ## Run
 
 ```bash
-/usr/bin/python3 scripts/build_dashboard.py --price-filter 30 --top-llm 10
+/usr/bin/python3 scripts/build_dashboard.py --price-filter 50 --top-llm 10
 ```
 
 Environment:
