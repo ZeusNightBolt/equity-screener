@@ -208,12 +208,15 @@ def build_diversified_top10(df: pd.DataFrame, per_sector_cap: int = 3) -> pd.Dat
             if len([i for i in picked if i in frame.index]) >= quota or len(picked) >= 10:
                 break
 
-    # 4 best all-around, 3 short/lows/peer-lag, 3 value-laggards, 3 momentum pullbacks.
+    # 4 best all-around, 3 short/lows/peer-lag, 3 value-laggards,
+    # 3 momentum pullbacks, 3 rel-strength pullbacks, 2 RSI breakout/inflection.
     # Fill any remaining by overall score.
     add_from(df, "opportunity_score", 4)
     add_from(df, "squeeze_laggard_score", 7)
     add_from(df, "value_laggard_score", 10)
     add_from(df, "momentum_pullback_score", 10)
+    add_from(df, "rel_strength_pullback_score", 10)
+    add_from(df, "inflect_breakout_score", 10)
     add_from(df, "opportunity_score", 10)
     out = df.loc[picked[:10]].copy()
     out["portfolio_rank"] = range(1, len(out) + 1)
@@ -326,7 +329,93 @@ def score_candidates(df: pd.DataFrame) -> pd.DataFrame:
         0.0,
     )
 
-    score_cols = ["rsi_value_score", "squeeze_laggard_score", "value_laggard_score", "momentum_pullback_score"]
+    # ── Relative Strength Pullback Score ──
+    # Winning-sector stocks with strong 3-month momentum that just had a sharp
+    # 1-week pullback into support/demand zones.  Finds the strongest stocks in
+    # the strongest sectors pulling back to buyable levels — a continuation
+    # bounce setup, not a reversal.
+    for c in ["sector_ret_1m_median", "sector_ret_3m_median", "price_vs_sma50_pct", "price_vs_sma200_pct"]:
+        df[c] = pd.to_numeric(df.get(c, np.nan), errors="coerce")
+
+    # 1) Sector strength (20%): higher sector_ret_1m_median = winning sector
+    df["sector_strength_score"] = pct_score(df["sector_ret_1m_median"], lower_is_better=False).fillna(50.0)
+
+    # 2) Stock relative strength (25%): higher ret_3m_pct = stronger stock
+    df["rel_strength_score_3m"] = pct_score(df["ret_3m_pct"], lower_is_better=False).fillna(50.0)
+
+    # 3) Pullback magnitude (25%): ABS(ret_1w_pct), deeper = better entry, capped at 15%
+    df["rs_pullback_depth"] = (-df["ret_1w_pct"]).clip(lower=3, upper=15)
+    df["rs_pullback_entry_score"] = pct_score(
+        df["rs_pullback_depth"].where(df["ret_1w_pct"].lt(-3)), lower_is_better=False,
+    ).fillna(0.0)
+
+    # 4) Support proximity (20%): closeness to SMA50 + SMA200 (closer = better)
+    df["rs_support_proximity"] = (
+        0.6 * pct_score(df["price_vs_sma50_pct"].abs(), lower_is_better=True).fillna(50.0)
+        + 0.4 * pct_score(df["price_vs_sma200_pct"].abs(), lower_is_better=True).fillna(50.0)
+    ).clip(0, 100)
+
+    # 5) RSI reset (10%): RSI 35-50 = cooled off but not broken; peak at 42.5
+    df["rs_rsi_reset_score"] = np.where(
+        df["rsi0"].between(35, 50),
+        (100.0 - abs(df["rsi0"] - 42.5) * 6.0).clip(0, 100),
+        np.where(df["rsi0"].between(30, 55), 30.0, 0.0),
+    )
+
+    # Gate (must pass all 4)
+    df["rs_pullback_eligible"] = (
+        df["sector_ret_1m_median"].gt(0)
+        & df["ret_3m_pct"].gt(df["sector_ret_3m_median"])
+        & df["ret_1w_pct"].lt(-3)
+        & df["from_52w_low_pct"].lt(30)
+    )
+
+    df["rel_strength_pullback_score"] = np.where(
+        df["rs_pullback_eligible"],
+        (
+            0.20 * df["sector_strength_score"]
+            + 0.25 * df["rel_strength_score_3m"]
+            + 0.25 * df["rs_pullback_entry_score"]
+            + 0.20 * df["rs_support_proximity"]
+            + 0.10 * df["rs_rsi_reset_score"]
+        ).clip(0, 100),
+        0.0,
+    )
+
+    score_cols = ["rsi_value_score", "squeeze_laggard_score", "value_laggard_score", "momentum_pullback_score", "rel_strength_pullback_score", "inflect_breakout_score"]
+    # Catches stocks where RSI is turning up from the 40-60 mid-range
+    # with expanding volume and sector tailwind — the early stage of
+    # a breakout, not a laggard reversal.
+    # Gate: RSI in 40-60 zone, rising (delta>0), accelerating, decent volume
+    df["inflect_breakout_eligible"] = (
+        df["rsi0"].between(40, 60)
+        & df["rsi_delta_1"].gt(0)
+        & df["rsi_accel"].gt(0)
+        & df["volume_vs_20d"].gt(0.8)
+    )
+    # RSI zone score: tent function peaking at RSI 48-52
+    df["rsi_zone_score"] = (100.0 - abs(df["rsi0"] - 50.0) * 4.0).clip(0, 100)
+    # RSI acceleration percentile rank
+    df["rsi_accel_breakout_pct"] = pct_score(df["rsi_accel"], lower_is_better=False).fillna(50.0)
+    # Volume expansion percentile rank
+    df["vol_expansion_pct"] = pct_score(df["volume_vs_20d"], lower_is_better=False).fillna(50.0)
+    # Sector tailwind percentile rank
+    df["sector_tailwind_pct"] = pct_score(df["sector_ret_1m_median"], lower_is_better=False).fillna(50.0)
+    # Short-term momentum bonus
+    df["st_mom_bonus"] = np.where(df["ret_1w_pct"] > 0, 50.0, 0.0)
+    df["inflect_breakout_score"] = np.where(
+        df["inflect_breakout_eligible"],
+        (
+            0.30 * df["rsi_zone_score"]
+            + 0.25 * df["rsi_accel_breakout_pct"]
+            + 0.20 * df["vol_expansion_pct"]
+            + 0.15 * df["sector_tailwind_pct"]
+            + 0.10 * df["st_mom_bonus"]
+        ).clip(0, 100),
+        0.0,
+    )
+
+    score_cols = ["rsi_value_score", "squeeze_laggard_score", "value_laggard_score", "momentum_pullback_score", "rel_strength_pullback_score", "inflect_breakout_score"]
     df["opportunity_score"] = df[score_cols].max(axis=1)
 
     # ── EV Master Score ──
@@ -337,8 +426,10 @@ def score_candidates(df: pd.DataFrame) -> pd.DataFrame:
         (pct_score(df["rsi_value_score"], lower_is_better=False).fillna(0)
          + pct_score(df["squeeze_laggard_score"], lower_is_better=False).fillna(0)
          + pct_score(df["value_laggard_score"], lower_is_better=False).fillna(0)
-         + pct_score(df["momentum_pullback_score"], lower_is_better=False).fillna(0))
-        / 4.0  # average percentile across all 4 sleeves
+         + pct_score(df["momentum_pullback_score"], lower_is_better=False).fillna(0)
+         + pct_score(df["rel_strength_pullback_score"], lower_is_better=False).fillna(0)
+         + pct_score(df["inflect_breakout_score"], lower_is_better=False).fillna(0))
+        / 6.0  # average percentile across all 6 sleeves
     ).clip(0, 100)
     # Asymmetric R:R: upside room (distance to 52w high) vs downside floor (distance to 52w low)
     df["upside_potential"] = (-df["from_52w_high_pct"]).clip(lower=5, upper=100)
@@ -361,12 +452,14 @@ def score_candidates(df: pd.DataFrame) -> pd.DataFrame:
     ).clip(0, 100)
     df["ev_master_eligible"] = df["ev_score"] >= 60
 
-    score_cols = ["rsi_value_score", "squeeze_laggard_score", "value_laggard_score", "momentum_pullback_score"]
+    score_cols = ["rsi_value_score", "squeeze_laggard_score", "value_laggard_score", "momentum_pullback_score", "rel_strength_pullback_score", "inflect_breakout_score"]
     labels = {
         "rsi_value_score": "RSI inflection + value",
         "squeeze_laggard_score": "shorted near lows / peer lag",
         "value_laggard_score": "cheap peer laggard",
         "momentum_pullback_score": "momentum pullback",
+        "rel_strength_pullback_score": "relative strength pullback",
+        "inflect_breakout_score": "RSI breakout inflection",
     }
     df["primary_strategy"] = df[score_cols].idxmax(axis=1).map(labels)
     df["rank_in_sector"] = df.groupby("sector")["opportunity_score"].rank(method="first", ascending=False).astype(int)
@@ -720,8 +813,8 @@ def clean_float(value):
 def record(row) -> dict:
     keys = [
         "global_rank", "rank_in_sector", "sector", "ticker", "company", "market_cap", "four_h_close", "display_close", "price_source", "latest_daily_close",
-        "opportunity_score", "rsi_value_score", "squeeze_laggard_score", "value_laggard_score", "momentum_pullback_score", "ev_score",
-        "rsi_acceleration_score", "composite_value_score", "rsi0", "rsi_delta_1",
+        "opportunity_score", "rsi_value_score", "squeeze_laggard_score", "value_laggard_score", "momentum_pullback_score", "inflect_breakout_score", "ev_score",
+        "rsi_acceleration_score", "composite_value_score", "rsi0", "rsi1", "rsi2", "rsi3", "rsi4", "rsi5", "rsi_delta_1",
         "prior_delta_3_avg", "rsi_accel", "inflection_flag", "yf_forward_pe", "yf_trailing_pe",
         "yf_price_to_book", "yf_peg_ratio", "from_52w_high_pct", "from_52w_low_pct", "short_pct_float",
         "ret_1w_pct", "ret_1m_pct", "ret_3m_pct", "ret_6m_pct", "ret_ytd_pct",
@@ -763,8 +856,156 @@ def fmt_bn(value):
 
 
 def render_bar(value, cls=""):
+    """Full-width gradient bar filling the cell."""
     v = 0 if value is None or (isinstance(value, float) and math.isnan(value)) else max(0, min(100, float(value)))
-    return f'<span class="bar {cls}"><i style="width:{v:.1f}%"></i></span><b>{v:.1f}</b>'
+    color_map = {"hot": "var(--green)", "value": "var(--purple)", "short": "var(--cyan)", "mom": "var(--red)"}
+    color = color_map.get(cls, "var(--amber)")
+    return f'<div class="score-bar" style="--bar-pct:{v:.0f}%;--bar-color:{color}"><span class="bar-fill"></span><span class="bar-score">{v:.0f}</span></div>'
+
+
+def score_heatmap(value):
+    """Return CSS opacity for heatmap cell background (0-1 based on 0-100 score)."""
+    v = 0 if value is None or (isinstance(value, float) and math.isnan(value)) else max(0, min(100, float(value)))
+    return f"hs-background:{v / 100:.2f}"
+
+
+def render_score_cell(value, cls=""):
+    """Score cell with full-width bar + heatmap background."""
+    v = 0 if value is None or (isinstance(value, float) and math.isnan(value)) else max(0, min(100, float(value)))
+    opacity = v / 100
+    # Heatmap: dark amber-to-color gradient background with opacity proportional to score
+    color_rgb = {"hot": "64,196,99", "value": "181,140,255", "short": "71,215,255", "mom": "255,92,92"}.get(cls, "230,180,34")
+    bg_alpha = 0.04 + opacity * 0.10  # subtle range 4%-14%
+    return (
+        f'<td class="score-td" style="background:rgba({color_rgb},{bg_alpha:.3f});--bar-pct:{v:.0f}%;--bar-color:rgb({color_rgb})">'
+        f'<div class="score-bar" style="--bar-pct:{v:.0f}%;--bar-color:rgb({color_rgb})">'
+        f'<span class="bar-fill"></span>'
+        f'<span class="bar-score">{v:.0f}</span>'
+        f'</div></td>'
+    )
+
+
+def render_sparkline(r):
+    """Render 6 RSI dots (rsi0..rsi5) as a mini sparkline row."""
+    dots = []
+    for i in range(6):
+        key = f"rsi{i}"
+        val = r.get(key)
+        if val is None or (isinstance(val, float) and math.isnan(val)):
+            dots.append('<span class="spark-dot dot-none" title="no data">○</span>')
+        else:
+            v = float(val)
+            if v < 30:
+                dots.append(f'<span class="spark-dot dot-oversold" title="RSI {v:.0f}">●</span>')
+            elif v < 40:
+                dots.append(f'<span class="spark-dot dot-cool" title="RSI {v:.0f}">●</span>')
+            elif v <= 60:
+                dots.append(f'<span class="spark-dot dot-neutral" title="RSI {v:.0f}">●</span>')
+            elif v <= 70:
+                dots.append(f'<span class="spark-dot dot-warm" title="RSI {v:.0f}">●</span>')
+            else:
+                dots.append(f'<span class="spark-dot dot-overbought" title="RSI {v:.0f}">●</span>')
+    # Add direction arrows between dots based on consecutive RSI values
+    spark_html = dots[0]
+    for idx in range(1, 6):
+        key_prev = f"rsi{idx-1}"
+        key_curr = f"rsi{idx}"
+        vp = r.get(key_prev)
+        vc = r.get(key_curr)
+        if vp is not None and vc is not None and not (isinstance(vp, float) and math.isnan(vp)) and not (isinstance(vc, float) and math.isnan(vc)):
+            if float(vc) > float(vp):
+                arrow = '<span class="spark-arrow arrow-up">↗</span>'
+            elif float(vc) < float(vp):
+                arrow = '<span class="spark-arrow arrow-down">↘</span>'
+            else:
+                arrow = '<span class="spark-arrow arrow-flat">→</span>'
+        else:
+            arrow = '<span class="spark-arrow arrow-flat">→</span>'
+        spark_html += arrow + dots[idx]
+    rsi0_val = r.get("rsi0")
+    rsi0_str = f"{float(rsi0_val):.0f}" if rsi0_val is not None and not (isinstance(rsi0_val, float) and math.isnan(rsi0_val)) else "—"
+    return f'<span class="sparkline">{spark_html}<span class="spark-label">{rsi0_str}</span></span>'
+
+
+def render_rsi_cell(r):
+    """RSI cell: color-coded (green/amber/red) plus momentum arrow."""
+    rsi = r.get("rsi0")
+    if rsi is None or (isinstance(rsi, float) and math.isnan(rsi)):
+        return '<td class="rsi-td">—</td>'
+    v = float(rsi)
+    if 30 <= v < 40:
+        cls = "rsi-opportunity"
+        label = "🔥 OPPORTUNITY"
+    elif 40 <= v < 60:
+        cls = "rsi-neutral"
+        label = ""
+    elif v >= 60:
+        cls = "rsi-overbought"
+        label = "⚠️ OVERBOUGHT"
+    else:
+        cls = "rsi-opportunity"
+        label = ""
+    delta = r.get("rsi_delta_1")
+    arrow = ""
+    if delta is not None and not (isinstance(delta, float) and math.isnan(delta)):
+        d = float(delta)
+        if d > 0:
+            arrow = ' <span class="mom-arrow mom-up" title="RSI rising">▲</span>'
+        elif d < 0:
+            arrow = ' <span class="mom-arrow mom-down" title="RSI falling">▼</span>'
+    return f'<td class="rsi-td {cls}"><span class="rsi-val">{v:.0f}</span>{arrow}<small>{label}</small></td>'
+
+
+def render_rank_badge(r):
+    """🏆 badge for #1 in sector."""
+    rank = r.get("rank_in_sector")
+    if rank == 1:
+        return '<span class="rank-badge" title="#1 in sector">🏆</span>'
+    return ""
+
+
+def render_mobile_card(r, rank_field="global_rank"):
+    """Compact vertical card for mobile: ticker, price, all scores stacked."""
+    badge = render_rank_badge(r)
+    rank = int(r[rank_field]) if rank_field in r and not pd.isna(r[rank_field]) else ""
+    rows = []
+    rows.append(f'<div class="mobile-card">')
+    rows.append(f'<div class="mc-head"><span class="mc-rank">{badge}#{rank}</span><a class="ticker-link" href="{finviz_url(r["ticker"])}" target="_blank" rel="noopener noreferrer">{html.escape(str(r["ticker"]))}</a><span class="mc-ticker">${fmt_money(r["display_close"])}</span></div>')
+    rows.append(f'<div class="mc-company">{html.escape(str(r.get("company",""))[:60])}</div>')
+    rows.append(f'<div class="mc-meta">{html.escape(str(r.get("sector","")))}{" · " + html.escape(str(r.get("primary_strategy",""))) if r.get("primary_strategy") else ""} · {fmt_bn(r["market_cap"])}</div>')
+    # Stack all scores vertically with full-width bars
+    scores = [
+        ("Opp", r.get("opportunity_score"), ""),
+        ("RSI", r.get("rsi_value_score"), "hot"),
+        ("Sqz", r.get("squeeze_laggard_score"), "short"),
+        ("Val", r.get("value_laggard_score"), "value"),
+        ("Momo", r.get("momentum_pullback_score"), "mom"),
+        ("RS Pb", r.get("rel_strength_pullback_score"), "rs"),
+        ("Brk", r.get("inflect_breakout_score"), "brk"),
+    ]
+    rows.append('<div class="mc-scores">')
+    for label, val, cls in scores:
+        v = 0 if val is None or (isinstance(val, float) and math.isnan(val)) else max(0, min(100, float(val)))
+        color_rgb = {"hot":"64,196,99","value":"181,140,255","short":"71,215,255","mom":"255,92,92","rs":"255,165,0","brk":"0,206,209"}.get(cls, "230,180,34")
+        rows.append(f'<div class="mc-score-row"><span class="mc-label">{label}</span><span class="bar {cls}"><i style="width:{v:.0f}%;background:rgb({color_rgb})"></i></span><b>{v:.0f}</b></div>')
+    rows.append('</div>')
+    # Details row: RSI, short float, from low
+    rsi0 = r.get("rsi0")
+    rsi_str = f"RSI {float(rsi0):.0f}" if rsi0 is not None and not (isinstance(rsi0, float) and math.isnan(rsi0)) else "RSI —"
+    short = r.get("short_pct_float")
+    short_str = f"Short {float(short):.1f}%" if short is not None and not (isinstance(short, float) and math.isnan(short)) else ""
+    from_low = r.get("from_52w_low_pct")
+    low_str = f"From low {float(from_low):.0f}%" if from_low is not None and not (isinstance(from_low, float) and math.isnan(from_low)) else ""
+    rows.append(f'<div class="mc-details">{rsi_str}{" · "+short_str if short_str else ""}{" · "+low_str if low_str else ""}</div>')
+    rows.append('</div>')
+    return "".join(rows)
+
+
+def mobile_section(heading, rows_list):
+    """Wrap a list of mobile card HTML strings in a section."""
+    if not rows_list:
+        return ""
+    return f'<div class="mobile-cards"><h2>{heading}</h2>{"".join(rows_list)}</div>'
 
 
 def finviz_url(ticker: str) -> str:
@@ -913,6 +1154,8 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
     squeeze = cap_by_sector(df.sort_values("squeeze_laggard_score", ascending=False), "squeeze_laggard_score", 15, 3)
     laggards = cap_by_sector(df.sort_values("value_laggard_score", ascending=False), "value_laggard_score", 15, 3)
     pullbacks = cap_by_sector(df[df["mom_pullback_eligible"]].sort_values("momentum_pullback_score", ascending=False), "momentum_pullback_score", 15, 3)
+    rs_pullbacks = cap_by_sector(df[df["rs_pullback_eligible"]].sort_values("rel_strength_pullback_score", ascending=False), "rel_strength_pullback_score", 15, 3)
+    inflect_breakouts = cap_by_sector(df[df["inflect_breakout_eligible"]].sort_values("inflect_breakout_score", ascending=False), "inflect_breakout_score", 15, 3)
     master_ev = cap_by_sector(
         df[df["ev_master_eligible"]].sort_values("ev_score", ascending=False),
         "ev_score", 20, 3,
@@ -930,6 +1173,8 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
         "squeeze_laggards": [record(r) for _, r in squeeze.iterrows()],
         "value_laggards": [record(r) for _, r in laggards.iterrows()],
         "momentum_pullbacks": [record(r) for _, r in pullbacks.iterrows()],
+        "rel_strength_pullbacks": [record(r) for _, r in rs_pullbacks.iterrows()],
+        "inflect_breakouts": [record(r) for _, r in inflect_breakouts.iterrows()],
         "master_opportunities": [record(r) for _, r in master_ev.iterrows()],
         "by_sector": [record(r) for _, r in top_sector.iterrows()],
         "llm_analysis": analyses,
@@ -938,36 +1183,131 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
     (DOCS_DIR / "dashboard_data.json").write_text(json.dumps(payload, indent=2, default=str))
 
     def row_html(r, rank_field="global_rank"):
+        badge = render_rank_badge(r)
         return (
             "<tr>"
-            f"<td>{int(r[rank_field]) if rank_field in r and not pd.isna(r[rank_field]) else ''}</td>"
+            f"<td>{badge}{int(r[rank_field]) if rank_field in r and not pd.isna(r[rank_field]) else ''}</td>"
             f"<td><strong>{ticker_link(r['ticker'])}</strong><small>{html.escape(str(r['company'])[:42])}</small></td>"
             f"<td>{html.escape(str(r['sector']))}<small>{html.escape(str(r.get('primary_strategy', '')))}</small></td>"
             f"<td>{fmt_money(r['display_close'])}<small>{html.escape(str(r.get('price_source', '')))}</small></td>"
             f"<td>{fmt_bn(r['market_cap'])}</td>"
-            f"<td>{render_bar(r['opportunity_score'])}</td>"
-            f"<td>{render_bar(r.get('rsi_value_score'), 'hot')}</td>"
-            f"<td>{render_bar(r.get('squeeze_laggard_score'), 'short')}</td>"
-            f"<td>{render_bar(r.get('value_laggard_score'), 'value')}</td>"
-            f"<td>{render_bar(r.get('momentum_pullback_score'), 'mom')}</td>"
+            f"{render_score_cell(r['opportunity_score'])}"
+            f"{render_rsi_cell(r)}"
+            f"{render_score_cell(r.get('squeeze_laggard_score'), 'short')}"
+            f"{render_score_cell(r.get('value_laggard_score'), 'value')}"
+            f"{render_score_cell(r.get('momentum_pullback_score'), 'mom')}"
+            f"{render_score_cell(r.get('rel_strength_pullback_score'), 'rs')}"
+            f"{render_score_cell(r.get('inflect_breakout_score'), 'brk')}"
+            f"<td>{render_sparkline(r)}</td>"
             f"<td>{fmt_num(r.get('short_pct_float'))}%</td>"
             f"<td>{fmt_num(r.get('from_52w_low_pct'))}%</td>"
             f"<td>{fmt_num(r.get('peer_lag_1m_pct'))}%</td>"
-            f"<td>{fmt_num(r.get('rsi_accel'))}</td>"
             "</tr>"
+        )
+
+    def master_row_html(r, rank_field="global_rank"):
+        """Master Opportunities comparison row: all 5 sleeve scores side by side with visual bars."""
+        badge = render_rank_badge(r)
+        return (
+            "<tr>"
+            f"<td>{badge}{int(r[rank_field]) if rank_field in r and not pd.isna(r[rank_field]) else ''}</td>"
+            f"<td><strong>{ticker_link(r['ticker'])}</strong><small>{html.escape(str(r['company'])[:42])}</small></td>"
+            f"<td>{html.escape(str(r['sector']))}<small>{html.escape(str(r.get('primary_strategy', '')))}</small></td>"
+            f"<td>{fmt_money(r['display_close'])}</td>"
+            f"<td>{fmt_bn(r['market_cap'])}</td>"
+            f"{render_score_cell(r['opportunity_score'])}"
+            f"{render_rsi_cell(r)}"
+            f"<td class='master-comparison'>"
+            f"<div class='master-comp-row'>"
+            f"<span class='comp-label'>RSI</span>{render_bar(r.get('rsi_value_score'), 'hot')}"
+            f"</div>"
+            f"<div class='master-comp-row'>"
+            f"<span class='comp-label'>Sqz</span>{render_bar(r.get('squeeze_laggard_score'), 'short')}"
+            f"</div>"
+            f"<div class='master-comp-row'>"
+            f"<span class='comp-label'>Val</span>{render_bar(r.get('value_laggard_score'), 'value')}"
+            f"</div>"
+            f"<div class='master-comp-row'>"
+            f"<span class='comp-label'>Mom</span>{render_bar(r.get('momentum_pullback_score'), 'mom')}"
+            f"</div>"
+            f"<div class='master-comp-row'>"
+            f"<span class='comp-label'>RS</span>{render_bar(r.get('rel_strength_pullback_score'), 'rs')}"
+            f"</div>"
+            f"<div class='master-comp-row'>"
+            f"<span class='comp-label'>Brk</span>{render_bar(r.get('inflect_breakout_score'), 'brk')}"
+            f"</div>"
+            f"</td>"
+            f"<td>{render_sparkline(r)}</td>"
+            f"<td>{fmt_num(r.get('short_pct_float'))}%</td>"
+            f"<td>{fmt_num(r.get('peer_lag_1m_pct'))}%</td>"
+            "</tr>"
+        )
+
+    def card_html(r, rank_field="global_rank"):
+        """Mobile card layout: compact vertical card with full-width score bars."""
+        badge = render_rank_badge(r)
+        rank_val = int(r[rank_field]) if rank_field in r and not pd.isna(r[rank_field]) else None
+        rank_str = f"<span class='mc-rank'>{badge}#{rank_val}</span>" if rank_val is not None else ""
+        ticker = r['ticker']
+        company = html.escape(str(r['company'])[:42])
+        sector = html.escape(str(r['sector']))
+        price = fmt_money(r['display_close'])
+        mcap = fmt_bn(r['market_cap'])
+        rsi_val = r.get('rsi0')
+        rsi_str = f"{float(rsi_val):.0f}" if rsi_val is not None and not (isinstance(rsi_val, float) and math.isnan(rsi_val)) else "—"
+
+        def _score_bar(value, score_cls=""):
+            v = 0 if value is None or (isinstance(value, float) and math.isnan(value)) else max(0, min(100, float(value)))
+            return f'<span class="bar {score_cls}"><i style="width:{v:.1f}%"></i></span><b>{v:.0f}</b>'
+
+        return (
+            "<div class='mobile-card'>"
+            f"<div class='mc-head'>"
+            f"{rank_str}"
+            f"<span class='mc-ticker'>{ticker_link(ticker)}</span>"
+            f"<span class='mc-company'>{company}</span>"
+            f"</div>"
+            f"<div class='mc-meta'><span>{sector}</span> &middot; <span>{price}</span> &middot; <span>{mcap}</span></div>"
+            f"<div class='mc-scores'>"
+            f"<div class='mc-score-row'><span class='mc-label'>Opp</span>{_score_bar(r['opportunity_score'])}</div>"
+            f"<div class='mc-score-row'><span class='mc-label'>RSI</span>{_score_bar(r.get('rsi_value_score'), 'hot')}</div>"
+            f"<div class='mc-score-row'><span class='mc-label'>Sqz</span>{_score_bar(r.get('squeeze_laggard_score'), 'short')}</div>"
+            f"<div class='mc-score-row'><span class='mc-label'>Val</span>{_score_bar(r.get('value_laggard_score'), 'value')}</div>"
+            f"<div class='mc-score-row'><span class='mc-label'>Mom</span>{_score_bar(r.get('momentum_pullback_score'), 'mom')}</div>"
+            f"<div class='mc-score-row'><span class='mc-label'>Brk</span>{_score_bar(r.get('inflect_breakout_score'), 'brk')}</div>"
+            f"</div>"
+            f"<div class='mc-details'>"
+            f"<span>RSI {rsi_str}</span> &middot; "
+            f"<span>Shrt {fmt_num(r.get('short_pct_float'))}%</span> &middot; "
+            f"<span>Lo {fmt_num(r.get('from_52w_low_pct'))}%</span> &middot; "
+            f"<span>Lag {fmt_num(r.get('peer_lag_1m_pct'))}%</span>"
+            f"</div>"
+            "</div>"
         )
 
     top_rows = [row_html(r) for _, r in top.iterrows()]
     div_rows = []
+    div_cards = []
     for display_rank, (_, r) in enumerate(diversified_top.iterrows(), 1):
         rr = r.copy()
         rr["display_rank"] = display_rank
         div_rows.append(row_html(rr, "display_rank"))
+        div_cards.append(card_html(rr, "display_rank"))
     inflect_rows = [row_html(r) for _, r in inflect.iterrows()]
+    inflect_cards = [card_html(r) for _, r in inflect.iterrows()]
     squeeze_rows = [row_html(r) for _, r in squeeze.iterrows()]
+    squeeze_cards = [card_html(r) for _, r in squeeze.iterrows()]
     laggard_rows = [row_html(r) for _, r in laggards.iterrows()]
+    laggard_cards = [card_html(r) for _, r in laggards.iterrows()]
     pullback_rows = [row_html(r) for _, r in pullbacks.iterrows()]
-    master_rows = [row_html(r) for _, r in master_ev.iterrows()]
+    pullback_cards = [card_html(r) for _, r in pullbacks.iterrows()]
+    inflect_breakout_rows = [row_html(r) for _, r in inflect_breakouts.iterrows()]
+    inflect_breakout_cards = [card_html(r) for _, r in inflect_breakouts.iterrows()]
+    rs_pullback_rows = [row_html(r) for _, r in rs_pullbacks.iterrows()]
+    rs_pullback_cards = [card_html(r) for _, r in rs_pullbacks.iterrows()]
+    master_rows = [master_row_html(r) for _, r in master_ev.iterrows()]
+    master_cards = [card_html(r) for _, r in master_ev.iterrows()]
+    top_cards = [card_html(r) for _, r in top.iterrows()]
 
     analysis_cards = []
     for item in analyses:
@@ -999,7 +1339,9 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
             )
         sector_sections.append(f"<section class='sector'><h3>{html.escape(str(sector))}</h3><ol>{''.join(items)}</ol></section>")
 
-    header = "<table><thead><tr><th>#</th><th>Ticker</th><th>Sector / Sleeve</th><th>4h Px</th><th>MCap</th><th>Opp</th><th>RSI</th><th>Short/Lows</th><th>Value/Lag</th><th>Momo Pb</th><th>Short</th><th>From Low</th><th>Peer Lag 1M</th><th>RSI Accel</th></tr></thead><tbody>"
+    header = "<table><thead><tr><th>#</th><th>Ticker</th><th>Sector / Sleeve</th><th>4h Px</th><th>MCap</th><th>Opp</th><th>RSI</th><th>Short/Lows</th><th>Value/Lag</th><th>Momo Pb</th><th>Rel Str Pb</th><th>RSI Brk</th><th>RSI 6-Period</th><th>Short%</th><th>From Low</th><th>Peer Lag 1M</th></tr></thead><tbody>"
+
+    master_header = "<table><thead><tr><th>#</th><th>Ticker</th><th>Sector / Sleeve</th><th>4h Px</th><th>MCap</th><th>Opp</th><th>RSI</th><th>All 6 Sleeves Compared</th><th>RSI 6-Period</th><th>Short%</th><th>Peer Lag 1M</th></tr></thead><tbody>"
 
     factor_baskets, factor_opps = factor_basket_analysis(df)
     factor_rows = []
@@ -1040,23 +1382,23 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
             theme_opp_rows.append(row_html(rr, "display_rank"))
 
     css = """
-:root{--bg:#080808;--panel:#101010;--panel2:#151515;--text:#e8e4d8;--muted:#8a867b;--line:#2a2822;--amber:#e6b422;--green:#40c463;--red:#ff5c5c;--purple:#b58cff;--cyan:#47d7ff}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:'JetBrains Mono','SFMono-Regular',Consolas,monospace;font-size:13px}header{border-bottom:1px solid var(--line);padding:18px 22px;background:#0d0d0d;position:sticky;top:0;z-index:2}h1{font-size:18px;margin:0 0 8px;color:var(--amber);letter-spacing:.04em}h2{font-size:15px;margin:28px 0 12px;color:var(--amber);text-transform:uppercase}h3{font-size:13px;color:var(--amber)}.status{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted)}.dot{color:var(--green)}main{padding:18px 22px;max-width:1600px;margin:0 auto}.note{border:1px solid var(--line);padding:12px;background:var(--panel);color:var(--muted);line-height:1.5}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:12px}.card,.sector{border:1px solid var(--line);background:var(--panel);padding:12px}.card-head{display:flex;justify-content:space-between;border-bottom:1px solid var(--line);padding-bottom:8px;margin-bottom:8px}.card-head span{color:var(--amber);font-size:16px;font-weight:bold}.card-head em{font-style:normal;color:var(--muted)}.metrics{color:var(--green);margin-bottom:8px}.sources{border:1px solid var(--line);background:#0b0b0b;padding:8px;margin:8px 0;color:var(--muted)}.sources b{color:var(--cyan)}.sources ol{margin:6px 0 0 18px;padding:0}.sources li{margin:3px 0}.sources a{color:var(--amber);text-decoration:none}.sources a:hover{color:var(--green)}.sources.missing{border-color:#3a2a2a}.card p{line-height:1.55;margin:0;color:#d8d2c3}table{width:100%;border-collapse:collapse;background:var(--panel)}th,td{border:1px solid var(--line);padding:8px;text-align:left;vertical-align:top}th{color:var(--amber);font-weight:600;background:#0e0e0e;position:sticky;top:76px}td small{display:block;color:var(--muted);font-size:11px;margin-top:3px}a.ticker-link{color:var(--amber);text-decoration:none;border-bottom:1px solid rgba(230,180,34,.45)}a.ticker-link:hover{color:var(--green);border-bottom-color:var(--green)}.nav{display:flex;gap:10px;margin-top:10px}.nav a{border:1px solid var(--line);padding:6px 8px;text-decoration:none}.nav a.active{color:#080808;background:var(--amber)}tr.selected td{background:#171203}.bar{display:inline-block;width:74px;height:7px;background:#242018;margin-right:8px;vertical-align:middle}.bar i{display:block;height:100%;background:var(--amber)}.bar.hot i{background:var(--green)}.bar.value i{background:var(--purple)}.bar.short i{background:var(--cyan)}.sector ol{margin:0;padding-left:22px}.sector li{margin:6px 0;line-height:1.45}.footer{color:var(--muted);font-size:11px;margin:28px 0}.pill{border:1px solid var(--line);padding:3px 6px;color:var(--amber);display:inline-block;margin-right:6px}a{color:var(--amber)}
+:root{--bg:#080808;--panel:#101010;--panel2:#151515;--text:#e8e4d8;--muted:#8a867b;--line:#2a2822;--amber:#e6b422;--green:#40c463;--red:#ff5c5c;--purple:#b58cff;--cyan:#47d7ff}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:'JetBrains Mono','SFMono-Regular',Consolas,monospace;font-size:13px}header{border-bottom:1px solid var(--line);padding:18px 22px;background:#0d0d0d;position:sticky;top:0;z-index:2}h1{font-size:18px;margin:0 0 8px;color:var(--amber);letter-spacing:.04em}h2{font-size:15px;margin:28px 0 12px;color:var(--amber);text-transform:uppercase}h3{font-size:13px;color:var(--amber)}.status{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted)}.dot{color:var(--green)}main{padding:18px 22px;max-width:1600px;margin:0 auto}.note{border:1px solid var(--line);padding:12px;background:var(--panel);color:var(--muted);line-height:1.5}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:12px}.card,.sector{border:1px solid var(--line);background:var(--panel);padding:12px}.card-head{display:flex;justify-content:space-between;border-bottom:1px solid var(--line);padding-bottom:8px;margin-bottom:8px}.card-head span{color:var(--amber);font-size:16px;font-weight:bold}.card-head em{font-style:normal;color:var(--muted)}.metrics{color:var(--green);margin-bottom:8px}.sources{border:1px solid var(--line);background:#0b0b0b;padding:8px;margin:8px 0;color:var(--muted)}.sources b{color:var(--cyan)}.sources ol{margin:6px 0 0 18px;padding:0}.sources li{margin:3px 0}.sources a{color:var(--amber);text-decoration:none}.sources a:hover{color:var(--green)}.sources.missing{border-color:#3a2a2a}.card p{line-height:1.55;margin:0;color:#d8d2c3}table{width:100%;border-collapse:collapse;background:var(--panel)}th,td{border:1px solid var(--line);padding:8px;text-align:left;vertical-align:top}th{color:var(--amber);font-weight:600;background:#0e0e0e;position:sticky;top:76px}td small{display:block;color:var(--muted);font-size:11px;margin-top:3px}a.ticker-link{color:var(--amber);text-decoration:none;border-bottom:1px solid rgba(230,180,34,.45)}a.ticker-link:hover{color:var(--green);border-bottom-color:var(--green)}.nav{display:flex;gap:10px;margin-top:10px}.nav a{border:1px solid var(--line);padding:6px 8px;text-decoration:none}.nav a.active{color:#080808;background:var(--amber)}tr.selected td{background:#171203}.score-bar{position:relative;width:100%;height:20px;background:#1a1a14;border-radius:3px;overflow:hidden}.score-bar .bar-fill{display:block;height:100%;width:var(--bar-pct);background:linear-gradient(90deg,transparent,var(--bar-color));border-right:2px solid var(--bar-color);transition:width .3s ease}.score-bar .bar-score{position:absolute;right:5px;top:50%;transform:translateY(-50%);font-size:11px;font-weight:700;color:var(--text);text-shadow:0 1px 2px #000}.score-td{padding:4px 6px!important;vertical-align:middle!important}td.master-comparison{padding:4px 6px!important;vertical-align:middle!important}.master-comp-row{display:flex;align-items:center;gap:4px;margin:2px 0}.master-comp-row .comp-label{font-size:9px;color:var(--muted);min-width:22px;text-transform:uppercase;font-weight:600}.master-comp-row .score-bar{height:14px}.sparkline{display:inline-flex;align-items:center;gap:1px;font-size:11px;line-height:1}.spark-dot{font-size:10px;line-height:1}.spark-dot.dot-oversold{color:#40c463}.spark-dot.dot-cool{color:#75d48a}.spark-dot.dot-neutral{color:var(--muted)}.spark-dot.dot-warm{color:#e6a83a}.spark-dot.dot-overbought{color:var(--red)}.spark-dot.dot-none{color:#3a3832}.spark-arrow{font-size:7px;margin:0 -1px}.spark-arrow.arrow-up{color:var(--green)}.spark-arrow.arrow-down{color:var(--red)}.spark-arrow.arrow-flat{color:#4a4842}.spark-label{font-size:10px;color:var(--muted);margin-left:6px;font-weight:700}.rsi-td{text-align:center;font-weight:700;padding:4px 8px!important;vertical-align:middle!important}.rsi-td.rsi-opportunity{background:rgba(64,196,99,.15);color:var(--green)}.rsi-td.rsi-neutral{color:var(--amber)}.rsi-td.rsi-overbought{background:rgba(255,92,92,.12);color:var(--red)}.rsi-td .rsi-val{font-size:15px;display:block}.rsi-td small{display:block;color:inherit;opacity:.7;font-size:9px;margin-top:1px}.mom-arrow{font-size:11px;vertical-align:middle}.mom-arrow.mom-up{color:var(--green)}.mom-arrow.mom-down{color:var(--red)}.rank-badge{font-size:13px;margin-right:3px;vertical-align:middle}.sector ol{margin:0;padding-left:22px}.sector li{margin:6px 0;line-height:1.45}.footer{color:var(--muted);font-size:11px;margin:28px 0}.pill{border:1px solid var(--line);padding:3px 6px;color:var(--amber);display:inline-block;margin-right:6px}a{color:var(--amber)}
 .tab-nav{display:flex;flex-wrap:wrap;gap:2px;border-bottom:2px solid var(--amber);margin-bottom:18px;position:sticky;top:90px;z-index:1;background:var(--bg);padding:4px 0}
 .tab-nav input[type=radio]{display:none}
 .tab-nav label{display:inline-block;padding:8px 14px;border:1px solid var(--line);border-bottom:none;background:var(--panel);color:var(--muted);cursor:pointer;font-size:13px;font-weight:600;border-radius:4px 4px 0 0;margin-right:2px;transition:all 0.15s}
 .tab-nav label:hover{color:var(--amber);background:var(--panel2)}
 .tab-nav input:checked+label{background:var(--amber);color:#0a0a0a;border-color:var(--amber)}
 .tab-content{display:none}
-#tab-opps:checked~.tab-nav label.opps-tab,#tab-rsi:checked~.tab-nav label.rsi-tab,#tab-sqz:checked~.tab-nav label.sqz-tab,#tab-val:checked~.tab-nav label.val-tab,#tab-mom:checked~.tab-nav label.mom-tab,#tab-master:checked~.tab-nav label.master-tab,#tab-sector:checked~.tab-nav label.sector-tab{background:var(--amber);color:#0a0a0a;border-color:var(--amber)}
-#tab-opps:checked~#c-opps,#tab-rsi:checked~#c-rsi,#tab-sqz:checked~#c-sqz,#tab-val:checked~#c-val,#tab-mom:checked~#c-mom,#tab-master:checked~#c-master,#tab-sector:checked~#c-sector{display:block}
-h2{margin-top:0}
+#tab-opps:checked~.tab-nav label.opps-tab,#tab-rsi:checked~.tab-nav label.rsi-tab,#tab-sqz:checked~.tab-nav label.sqz-tab,#tab-val:checked~.tab-nav label.val-tab,#tab-mom:checked~.tab-nav label.mom-tab,#tab-brk:checked~.tab-nav label.brk-tab,#tab-rspb:checked~.tab-nav label.rspb-tab,#tab-master:checked~.tab-nav label.master-tab,#tab-sector:checked~.tab-nav label.sector-tab{background:var(--amber);color:#0a0a0a;border-color:var(--amber)}
+#tab-opps:checked~#c-opps,#tab-rsi:checked~#c-rsi,#tab-sqz:checked~#c-sqz,#tab-val:checked~#c-val,#tab-mom:checked~#c-mom,#tab-brk:checked~#c-brk,#tab-rspb:checked~#c-rspb,#tab-master:checked~#c-master,#tab-sector:checked~#c-sector{display:block}
+h2{margin-top:0}\n.mobile-cards{display:none}\n@media(max-width:768px){.tab-content table,.tab-content thead,.tab-content tbody{display:none!important}.mobile-cards{display:block}.tab-nav{top:70px;gap:1px}.tab-nav label{font-size:10px;padding:6px 8px;margin-right:0}.tab-nav label .tab-emoji{font-size:13px}header{padding:12px 14px}h1{font-size:15px}main{padding:10px 12px}h2{font-size:13px;margin:18px 0 8px}.status{font-size:10px;gap:8px}.note{font-size:11px;padding:8px}.mobile-card{border:1px solid var(--line);background:var(--panel);padding:10px 12px;margin-bottom:8px}.mc-head{display:flex;align-items:baseline;gap:6px;flex-wrap:wrap;margin-bottom:4px}.mc-rank{color:var(--amber);font-weight:700;font-size:13px;flex-shrink:0}.mc-ticker{font-size:14px}.mc-company{color:var(--muted);font-size:11px}.mc-meta{color:var(--muted);font-size:10px;margin-bottom:8px;display:flex;gap:4px;flex-wrap:wrap}.mc-scores{display:flex;flex-direction:column;gap:5px;margin-bottom:6px}.mc-score-row{display:flex;align-items:center;gap:6px}.mc-label{color:var(--muted);font-size:10px;width:32px;flex-shrink:0;text-align:right}.mobile-card .bar{flex:1;width:auto!important;height:14px;margin-right:4px}.mobile-card .bar i{height:100%}.mobile-card .bar+b{font-size:11px;min-width:30px;text-align:right;color:var(--text)}.mc-details{color:var(--muted);font-size:10px;border-top:1px solid var(--line);padding-top:6px;margin-top:4px;display:flex;gap:6px;flex-wrap:wrap}.score-bar{height:14px}.score-bar .bar-score{font-size:9px}.master-comp-row .score-bar{height:10px}.sparkline{gap:0}.spark-dot{font-size:8px}.spark-arrow{font-size:5px}.spark-label{font-size:8px;margin-left:3px}.rsi-td .rsi-val{font-size:12px}th,td{padding:4px}table{font-size:11px}.grid{grid-template-columns:1fr}.footer{font-size:10px;margin:18px 0}}
 """
     content = f"""<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Equity Screener</title><style>{css}</style></head>
 <body><header><h1>EQUITY SCREENER</h1><div class="status"><span class="dot">● LIVE</span><span>generated {html.escape(now_et.strftime('%Y-%m-%d %H:%M %Z'))}</span><span>latest 4h {html.escape(latest_ts)}</span><span>price &lt; ${price_filter:.0f}</span><span>{len(df)} names / {df['sector'].nunique() if not df.empty else 0} sectors</span><span>top 10 capped at max 3/sector</span></div><nav class="nav"><a class="active" href="index.html">Opportunities</a><a href="factor-baskets.html">Factor basket inflections</a></nav></header>
 <main>
-<div class="note"><span class="pill">Method</span> Multi-sleeve rank: RSI inflection + value, shorted-near-lows / peer lag, cheap peer laggards, and momentum pullbacks. The top 10 blends four sleeves and is diversified with a hard cap of 3 stocks per sector. Momentum pullbacks scan for strong 6-month uptrends that have pulled back 1-2 weeks and are coiling into moving averages — a continuation setup.</div>
+<div class="note"><span class="pill">Method</span> Multi-sleeve rank: RSI inflection + value, shorted-near-lows / peer lag, cheap peer laggards, momentum pullbacks, and RSI breakout/inflection. The top 10 blends five sleeves and is diversified with a hard cap of 3 stocks per sector. RSI breakout catches stocks where RSI is turning up from the 40-60 mid-range with expanding volume and sector tailwind — the early stage of a breakout. Momentum pullbacks scan for strong 6-month uptrends that have pulled back 1-2 weeks and are coiling into moving averages — a continuation setup.</div>
 
 <!-- Tab radio inputs -->
 <input type="radio" name="tab" id="tab-opps" checked>
@@ -1064,7 +1406,9 @@ h2{margin-top:0}
 <input type="radio" name="tab" id="tab-sqz">
 <input type="radio" name="tab" id="tab-val">
 <input type="radio" name="tab" id="tab-mom">
+<input type="radio" name="tab" id="tab-brk">
 <input type="radio" name="tab" id="tab-master">
+<input type="radio" name="tab" id="tab-rspb">
 <input type="radio" name="tab" id="tab-sector">
 
 <nav class="tab-nav">
@@ -1073,11 +1417,14 @@ h2{margin-top:0}
 <label class="sqz-tab" for="tab-sqz">🔻 Squeeze Laggards</label>
 <label class="val-tab" for="tab-val">💰 Value Laggards</label>
 <label class="mom-tab" for="tab-mom">🚀 Momentum Pullbacks</label>
+<label class="brk-tab" for="tab-brk">📊 RSI Breakout</label>
+<label class="rspb-tab" for="tab-rspb">🎯 RS Pullbacks</label>
 <label class="master-tab" for="tab-master">⭐ Master Opportunities</label>
 <label class="sector-tab" for="tab-sector">🏭 By Sector</label>
 </nav>
 
 <div class="tab-content" id="c-opps">
+{''.join(div_cards)}
 <h2>Multi-sleeve top 10 opportunities</h2>{header}{''.join(div_rows)}</tbody></table>
 <h2>Web-sourced deep dive: diversified top 10</h2><div class="grid">{''.join(analysis_cards)}</div>
 <h2>Top 25 diversified ranked opportunities</h2>{header}{''.join(top_rows)}</tbody></table>
@@ -1096,11 +1443,23 @@ h2{margin-top:0}
 </div>
 
 <div class="tab-content" id="c-mom">
+{''.join(pullback_cards)}
 <h2>Momentum pullback sleeve</h2>{header}{''.join(pullback_rows)}</tbody></table>
 </div>
 
+<div class="tab-content" id="c-brk">
+{''.join(inflect_breakout_cards)}
+<h2>RSI Breakout / Inflection sleeve</h2>{header}{''.join(inflect_breakout_rows)}</tbody></table>
+</div>
+
+<div class="tab-content" id="c-rspb">
+{''.join(rs_pullback_cards)}
+<h2>🎯 Relative Strength Pullback sleeve</h2><p class="note"><span class="pill">RS Pullback</span> Winning-sector stocks with strong 3-month momentum that sold off sharply this week into support/demand zones. Gate: sector > 0%, stock outperformed sector, 1-week pullback < -3%, not broken (>30% above low). Scored by sector strength, relative strength, pullback depth, SMA proximity, and RSI reset.</p>{header}{''.join(rs_pullback_rows)}</tbody></table>
+</div>
+
 <div class="tab-content" id="c-master">
-<h2>⭐ Master Opportunities — High Expected Value</h2><p class="note"><span class="pill">EV Formula</span> 35% top sleeve signal + 25% cross-sleeve agreement + 25% asymmetric R:R + 15% factor alignment. Only stocks scoring ≥60 across all dimensions qualify. Sorted by EV score, capped at 3 per sector.</p>{header}{''.join(master_rows)}</tbody></table>
+{''.join(master_cards)}
+<h2>⭐ Master Opportunities — High Expected Value</h2><p class="note"><span class="pill">EV Formula</span> 35% top sleeve signal + 25% cross-sleeve agreement + 25% asymmetric R:R + 15% factor alignment. Only stocks scoring ≥60 across all dimensions qualify. Sorted by EV score, capped at 3 per sector. All 6 sleeve scores shown side-by-side for direct comparison.</p>{master_header}{''.join(master_rows)}</tbody></table>
 </div>
 
 <div class="tab-content" id="c-sector">
