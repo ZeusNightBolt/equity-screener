@@ -18,4 +18,4 @@ print(f'OK: 4h RSI data is {age_hours:.0f}h old (max={ti_max[0]})')
 db.close()
 " || exit $?
 
-/usr/bin/python3 scripts/build_dashboard.py --price-filter 30 --top-llm 10 --push
+/usr/bin/python3 scripts/build_dashboard.py --price-filter 75 --top-llm 10 --push
