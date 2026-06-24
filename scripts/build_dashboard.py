@@ -208,10 +208,12 @@ def build_diversified_top10(df: pd.DataFrame, per_sector_cap: int = 3) -> pd.Dat
             if len([i for i in picked if i in frame.index]) >= quota or len(picked) >= 10:
                 break
 
-    # 4 best all-around, 3 short/lows/peer-lag, 3 value-laggards. Fill any remaining by overall score.
+    # 4 best all-around, 3 short/lows/peer-lag, 3 value-laggards, 3 momentum pullbacks.
+    # Fill any remaining by overall score.
     add_from(df, "opportunity_score", 4)
     add_from(df, "squeeze_laggard_score", 7)
     add_from(df, "value_laggard_score", 10)
+    add_from(df, "momentum_pullback_score", 10)
     add_from(df, "opportunity_score", 10)
     out = df.loc[picked[:10]].copy()
     out["portfolio_rank"] = range(1, len(out) + 1)
@@ -276,12 +278,61 @@ def score_candidates(df: pd.DataFrame) -> pd.DataFrame:
     ).clip(0, 100)
     df["value_laggard_score"] = (0.45 * df["composite_value_score"] + 0.35 * df["peer_lag_score"] + 0.20 * df["near_low_score"]).clip(0, 100)
 
-    score_cols = ["rsi_value_score", "squeeze_laggard_score", "value_laggard_score"]
+    # ── Momentum Pullback Score ──
+    # Strong 6-month upward momentum + 1-2 week pullback + consolidating near
+    # moving averages.  This screen finds stocks like NBIS: strong multi-month
+    # uptrend that just sold off short-term and is coiling into SMAs — a
+    # continuation setup, not a reversal.
+    for c in ["ret_6m_pct", "ret_1w_pct", "price_vs_sma50_pct", "price_vs_sma200_pct"]:
+        df[c] = pd.to_numeric(df.get(c, np.nan), errors="coerce")
+    df["ret_6m_pct_score"] = pct_score(df["ret_6m_pct"], lower_is_better=False).fillna(50.0)
+    # Pullback depth: scored where 5-40% below 52w high (meaningful dip, not broken)
+    df["pullback_depth"] = (-df["from_52w_high_pct"]).clip(lower=0)
+    df["pullback_score"] = pct_score(
+        df["pullback_depth"].where(df["pullback_depth"].between(5, 40)),
+        lower_is_better=False,
+    ).fillna(0.0)
+    # Consolidation: proximity to SMA50 + SMA200 (closer → tighter coil)
+    df["sma_proximity_score"] = (
+        0.6 * pct_score(df["price_vs_sma50_pct"].abs(), lower_is_better=True).fillna(50.0)
+        + 0.4 * pct_score(df["price_vs_sma200_pct"].abs(), lower_is_better=True).fillna(50.0)
+    ).clip(0, 100)
+    # RSI cooling tent: peaks at ~45-50, decays toward 30 and 70
+    df["rsi_cool_score"] = np.where(
+        df["rsi0"].between(30, 65),
+        (100.0 - abs(df["rsi0"] - 47.5) * 5.0).clip(0, 100),
+        0.0,
+    )
+    # Volume contraction during pullback (sub-1.0 = drying up)
+    df["vol_contract_score"] = pct_score(
+        df["volume_vs_20d"].clip(upper=1.5), lower_is_better=True,
+    ).fillna(50.0)
+    # Gate: must have momentum (6m >10%), recent pullback (1w <0%), off highs
+    df["mom_pullback_eligible"] = (
+        df["ret_6m_pct"].gt(10)
+        & df["ret_1w_pct"].lt(0)
+        & df["from_52w_high_pct"].lt(-5)
+        & df["rsi0"].between(30, 65)
+    )
+    df["momentum_pullback_score"] = np.where(
+        df["mom_pullback_eligible"],
+        (
+            0.30 * df["ret_6m_pct_score"]
+            + 0.25 * df["pullback_score"]
+            + 0.20 * df["sma_proximity_score"]
+            + 0.15 * df["rsi_cool_score"]
+            + 0.10 * df["vol_contract_score"]
+        ).clip(0, 100),
+        0.0,
+    )
+
+    score_cols = ["rsi_value_score", "squeeze_laggard_score", "value_laggard_score", "momentum_pullback_score"]
     df["opportunity_score"] = df[score_cols].max(axis=1)
     labels = {
         "rsi_value_score": "RSI inflection + value",
         "squeeze_laggard_score": "shorted near lows / peer lag",
         "value_laggard_score": "cheap peer laggard",
+        "momentum_pullback_score": "momentum pullback",
     }
     df["primary_strategy"] = df[score_cols].idxmax(axis=1).map(labels)
     df["rank_in_sector"] = df.groupby("sector")["opportunity_score"].rank(method="first", ascending=False).astype(int)
@@ -827,6 +878,7 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
     inflect = cap_by_sector(df[df["is_top_inflection"]], "rsi_value_score", 15, 3)
     squeeze = cap_by_sector(df.sort_values("squeeze_laggard_score", ascending=False), "squeeze_laggard_score", 15, 3)
     laggards = cap_by_sector(df.sort_values("value_laggard_score", ascending=False), "value_laggard_score", 15, 3)
+    pullbacks = cap_by_sector(df[df["mom_pullback_eligible"]].sort_values("momentum_pullback_score", ascending=False), "momentum_pullback_score", 15, 3)
 
     payload = {
         "generated_at": now_et.isoformat(),
@@ -839,6 +891,7 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
         "inflections": [record(r) for _, r in inflect.iterrows()],
         "squeeze_laggards": [record(r) for _, r in squeeze.iterrows()],
         "value_laggards": [record(r) for _, r in laggards.iterrows()],
+        "momentum_pullbacks": [record(r) for _, r in pullbacks.iterrows()],
         "by_sector": [record(r) for _, r in top_sector.iterrows()],
         "llm_analysis": analyses,
     }
@@ -857,6 +910,7 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
             f"<td>{render_bar(r.get('rsi_value_score'), 'hot')}</td>"
             f"<td>{render_bar(r.get('squeeze_laggard_score'), 'short')}</td>"
             f"<td>{render_bar(r.get('value_laggard_score'), 'value')}</td>"
+            f"<td>{render_bar(r.get('momentum_pullback_score'), 'mom')}</td>"
             f"<td>{fmt_num(r.get('short_pct_float'))}%</td>"
             f"<td>{fmt_num(r.get('from_52w_low_pct'))}%</td>"
             f"<td>{fmt_num(r.get('peer_lag_1m_pct'))}%</td>"
@@ -873,6 +927,7 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
     inflect_rows = [row_html(r) for _, r in inflect.iterrows()]
     squeeze_rows = [row_html(r) for _, r in squeeze.iterrows()]
     laggard_rows = [row_html(r) for _, r in laggards.iterrows()]
+    pullback_rows = [row_html(r) for _, r in pullbacks.iterrows()]
 
     analysis_cards = []
     for item in analyses:
@@ -904,7 +959,7 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
             )
         sector_sections.append(f"<section class='sector'><h3>{html.escape(str(sector))}</h3><ol>{''.join(items)}</ol></section>")
 
-    header = "<table><thead><tr><th>#</th><th>Ticker</th><th>Sector / Sleeve</th><th>4h Px</th><th>MCap</th><th>Opp</th><th>RSI</th><th>Short/Lows</th><th>Value/Lag</th><th>Short</th><th>From Low</th><th>Peer Lag 1M</th><th>RSI Accel</th></tr></thead><tbody>"
+    header = "<table><thead><tr><th>#</th><th>Ticker</th><th>Sector / Sleeve</th><th>4h Px</th><th>MCap</th><th>Opp</th><th>RSI</th><th>Short/Lows</th><th>Value/Lag</th><th>Momo Pb</th><th>Short</th><th>From Low</th><th>Peer Lag 1M</th><th>RSI Accel</th></tr></thead><tbody>"
 
     factor_baskets, factor_opps = factor_basket_analysis(df)
     factor_rows = []
@@ -952,12 +1007,13 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
 <title>RSI Value Opportunities</title><style>{css}</style></head>
 <body><header><h1>MULTI-SLEEVE VALUE OPPORTUNITIES</h1><div class="status"><span class="dot">● LIVE</span><span>generated {html.escape(now_et.strftime('%Y-%m-%d %H:%M %Z'))}</span><span>latest 4h {html.escape(latest_ts)}</span><span>price &lt; ${price_filter:.0f}</span><span>{len(df)} names / {df['sector'].nunique() if not df.empty else 0} sectors</span><span>top 10 capped at max 3/sector</span></div><nav class="nav"><a class="active" href="index.html">Opportunities</a><a href="factor-baskets.html">Factor basket inflections</a></nav></header>
 <main>
-<div class="note"><span class="pill">Method</span> Multi-sleeve rank: RSI inflection + value, shorted-near-lows / peer lag, and cheap peer laggards. The top 10 blends three sleeves and is diversified with a hard cap of 3 stocks per sector. Known numeric data comes from the local Polygon/DuckDB warehouse; web-sourced notes use internet search + article extraction and are cited. If no source extracts cleanly, the card says qualitative commentary is unavailable rather than inventing a catalyst.</div>
+<div class="note"><span class="pill">Method</span> Multi-sleeve rank: RSI inflection + value, shorted-near-lows / peer lag, cheap peer laggards, and momentum pullbacks. The top 10 blends four sleeves and is diversified with a hard cap of 3 stocks per sector. Momentum pullbacks scan for strong 6-month uptrends that have pulled back 1-2 weeks and are coiling into moving averages — a continuation setup. Known numeric data comes from the local Polygon/DuckDB warehouse; web-sourced notes use internet search + article extraction and are cited. If no source extracts cleanly, the card says qualitative commentary is unavailable rather than inventing a catalyst.</div>
 <h2>Multi-sleeve top 10 opportunities</h2>{header}{''.join(div_rows)}</tbody></table>
 <h2>Web-sourced deep dive: diversified top 10</h2><div class="grid">{''.join(analysis_cards)}</div>
 <h2>RSI inflection sleeve</h2>{header}{''.join(inflect_rows)}</tbody></table>
 <h2>Shorted near lows / peer lag sleeve</h2>{header}{''.join(squeeze_rows)}</tbody></table>
 <h2>Cheap peer laggard sleeve</h2>{header}{''.join(laggard_rows)}</tbody></table>
+<h2>Momentum pullback sleeve</h2>{header}{''.join(pullback_rows)}</tbody></table>
 <h2>Top 25 diversified ranked opportunities</h2>{header}{''.join(top_rows)}</tbody></table>
 <h2>Top by sector</h2><div class="grid">{''.join(sector_sections)}</div>
 <div class="footer">Known: numeric data from local Polygon/DuckDB warehouse; cited qualitative commentary from extracted web sources. Estimated: composite scores from normalized warehouse fields. Unknown: catalysts or risks not present in extracted sources or warehouse fields.</div>
