@@ -388,7 +388,7 @@ def call_llm(prompt: str) -> str:
         headers = {
             "Authorization": f"Bearer {openrouter_key}",
             "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/ZeusNightBolt/rsi-value-opportunities",
+            "HTTP-Referer": "https://github.com/ZeusNightBolt/equity-screener",
             "X-Title": "RSI Value Opportunities Dashboard",
         }
         model = "deepseek/deepseek-chat-v3-0324"
