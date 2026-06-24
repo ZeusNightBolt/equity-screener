@@ -1001,21 +1001,66 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
 
     css = """
 :root{--bg:#080808;--panel:#101010;--panel2:#151515;--text:#e8e4d8;--muted:#8a867b;--line:#2a2822;--amber:#e6b422;--green:#40c463;--red:#ff5c5c;--purple:#b58cff;--cyan:#47d7ff}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:'JetBrains Mono','SFMono-Regular',Consolas,monospace;font-size:13px}header{border-bottom:1px solid var(--line);padding:18px 22px;background:#0d0d0d;position:sticky;top:0;z-index:2}h1{font-size:18px;margin:0 0 8px;color:var(--amber);letter-spacing:.04em}h2{font-size:15px;margin:28px 0 12px;color:var(--amber);text-transform:uppercase}h3{font-size:13px;color:var(--amber)}.status{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted)}.dot{color:var(--green)}main{padding:18px 22px;max-width:1600px;margin:0 auto}.note{border:1px solid var(--line);padding:12px;background:var(--panel);color:var(--muted);line-height:1.5}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:12px}.card,.sector{border:1px solid var(--line);background:var(--panel);padding:12px}.card-head{display:flex;justify-content:space-between;border-bottom:1px solid var(--line);padding-bottom:8px;margin-bottom:8px}.card-head span{color:var(--amber);font-size:16px;font-weight:bold}.card-head em{font-style:normal;color:var(--muted)}.metrics{color:var(--green);margin-bottom:8px}.sources{border:1px solid var(--line);background:#0b0b0b;padding:8px;margin:8px 0;color:var(--muted)}.sources b{color:var(--cyan)}.sources ol{margin:6px 0 0 18px;padding:0}.sources li{margin:3px 0}.sources a{color:var(--amber);text-decoration:none}.sources a:hover{color:var(--green)}.sources.missing{border-color:#3a2a2a}.card p{line-height:1.55;margin:0;color:#d8d2c3}table{width:100%;border-collapse:collapse;background:var(--panel)}th,td{border:1px solid var(--line);padding:8px;text-align:left;vertical-align:top}th{color:var(--amber);font-weight:600;background:#0e0e0e;position:sticky;top:76px}td small{display:block;color:var(--muted);font-size:11px;margin-top:3px}a.ticker-link{color:var(--amber);text-decoration:none;border-bottom:1px solid rgba(230,180,34,.45)}a.ticker-link:hover{color:var(--green);border-bottom-color:var(--green)}.nav{display:flex;gap:10px;margin-top:10px}.nav a{border:1px solid var(--line);padding:6px 8px;text-decoration:none}.nav a.active{color:#080808;background:var(--amber)}tr.selected td{background:#171203}.bar{display:inline-block;width:74px;height:7px;background:#242018;margin-right:8px;vertical-align:middle}.bar i{display:block;height:100%;background:var(--amber)}.bar.hot i{background:var(--green)}.bar.value i{background:var(--purple)}.bar.short i{background:var(--cyan)}.sector ol{margin:0;padding-left:22px}.sector li{margin:6px 0;line-height:1.45}.footer{color:var(--muted);font-size:11px;margin:28px 0}.pill{border:1px solid var(--line);padding:3px 6px;color:var(--amber);display:inline-block;margin-right:6px}a{color:var(--amber)}
+.tab-nav{display:flex;flex-wrap:wrap;gap:2px;border-bottom:2px solid var(--amber);margin-bottom:18px;position:sticky;top:90px;z-index:1;background:var(--bg);padding:4px 0}
+.tab-nav input[type=radio]{display:none}
+.tab-nav label{display:inline-block;padding:8px 14px;border:1px solid var(--line);border-bottom:none;background:var(--panel);color:var(--muted);cursor:pointer;font-size:13px;font-weight:600;border-radius:4px 4px 0 0;margin-right:2px;transition:all 0.15s}
+.tab-nav label:hover{color:var(--amber);background:var(--panel2)}
+.tab-nav input:checked+label{background:var(--amber);color:#0a0a0a;border-color:var(--amber)}
+.tab-content{display:none}
+#tab-opps:checked~.tab-nav label.opps-tab,#tab-rsi:checked~.tab-nav label.rsi-tab,#tab-sqz:checked~.tab-nav label.sqz-tab,#tab-val:checked~.tab-nav label.val-tab,#tab-mom:checked~.tab-nav label.mom-tab,#tab-sector:checked~.tab-nav label.sector-tab{background:var(--amber);color:#0a0a0a;border-color:var(--amber)}
+#tab-opps:checked~#c-opps,#tab-rsi:checked~#c-rsi,#tab-sqz:checked~#c-sqz,#tab-val:checked~#c-val,#tab-mom:checked~#c-mom,#tab-sector:checked~#c-sector{display:block}
+h2{margin-top:0}
 """
     content = f"""<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>RSI Value Opportunities</title><style>{css}</style></head>
 <body><header><h1>MULTI-SLEEVE VALUE OPPORTUNITIES</h1><div class="status"><span class="dot">● LIVE</span><span>generated {html.escape(now_et.strftime('%Y-%m-%d %H:%M %Z'))}</span><span>latest 4h {html.escape(latest_ts)}</span><span>price &lt; ${price_filter:.0f}</span><span>{len(df)} names / {df['sector'].nunique() if not df.empty else 0} sectors</span><span>top 10 capped at max 3/sector</span></div><nav class="nav"><a class="active" href="index.html">Opportunities</a><a href="factor-baskets.html">Factor basket inflections</a></nav></header>
 <main>
-<div class="note"><span class="pill">Method</span> Multi-sleeve rank: RSI inflection + value, shorted-near-lows / peer lag, cheap peer laggards, and momentum pullbacks. The top 10 blends four sleeves and is diversified with a hard cap of 3 stocks per sector. Momentum pullbacks scan for strong 6-month uptrends that have pulled back 1-2 weeks and are coiling into moving averages — a continuation setup. Known numeric data comes from the local Polygon/DuckDB warehouse; web-sourced notes use internet search + article extraction and are cited. If no source extracts cleanly, the card says qualitative commentary is unavailable rather than inventing a catalyst.</div>
+<div class="note"><span class="pill">Method</span> Multi-sleeve rank: RSI inflection + value, shorted-near-lows / peer lag, cheap peer laggards, and momentum pullbacks. The top 10 blends four sleeves and is diversified with a hard cap of 3 stocks per sector. Momentum pullbacks scan for strong 6-month uptrends that have pulled back 1-2 weeks and are coiling into moving averages — a continuation setup.</div>
+
+<!-- Tab radio inputs -->
+<input type="radio" name="tab" id="tab-opps" checked>
+<input type="radio" name="tab" id="tab-rsi">
+<input type="radio" name="tab" id="tab-sqz">
+<input type="radio" name="tab" id="tab-val">
+<input type="radio" name="tab" id="tab-mom">
+<input type="radio" name="tab" id="tab-sector">
+
+<nav class="tab-nav">
+<label class="opps-tab" for="tab-opps">🥇 Opportunities</label>
+<label class="rsi-tab" for="tab-rsi">📈 RSI Inflections</label>
+<label class="sqz-tab" for="tab-sqz">🔻 Squeeze Laggards</label>
+<label class="val-tab" for="tab-val">💰 Value Laggards</label>
+<label class="mom-tab" for="tab-mom">🚀 Momentum Pullbacks</label>
+<label class="sector-tab" for="tab-sector">🏭 By Sector</label>
+</nav>
+
+<div class="tab-content" id="c-opps">
 <h2>Multi-sleeve top 10 opportunities</h2>{header}{''.join(div_rows)}</tbody></table>
 <h2>Web-sourced deep dive: diversified top 10</h2><div class="grid">{''.join(analysis_cards)}</div>
-<h2>RSI inflection sleeve</h2>{header}{''.join(inflect_rows)}</tbody></table>
-<h2>Shorted near lows / peer lag sleeve</h2>{header}{''.join(squeeze_rows)}</tbody></table>
-<h2>Cheap peer laggard sleeve</h2>{header}{''.join(laggard_rows)}</tbody></table>
-<h2>Momentum pullback sleeve</h2>{header}{''.join(pullback_rows)}</tbody></table>
 <h2>Top 25 diversified ranked opportunities</h2>{header}{''.join(top_rows)}</tbody></table>
+</div>
+
+<div class="tab-content" id="c-rsi">
+<h2>RSI inflection sleeve</h2>{header}{''.join(inflect_rows)}</tbody></table>
+</div>
+
+<div class="tab-content" id="c-sqz">
+<h2>Shorted near lows / peer lag sleeve</h2>{header}{''.join(squeeze_rows)}</tbody></table>
+</div>
+
+<div class="tab-content" id="c-val">
+<h2>Cheap peer laggard sleeve</h2>{header}{''.join(laggard_rows)}</tbody></table>
+</div>
+
+<div class="tab-content" id="c-mom">
+<h2>Momentum pullback sleeve</h2>{header}{''.join(pullback_rows)}</tbody></table>
+</div>
+
+<div class="tab-content" id="c-sector">
 <h2>Top by sector</h2><div class="grid">{''.join(sector_sections)}</div>
+</div>
+
 <div class="footer">Known: numeric data from local Polygon/DuckDB warehouse; cited qualitative commentary from extracted web sources. Estimated: composite scores from normalized warehouse fields. Unknown: catalysts or risks not present in extracted sources or warehouse fields.</div>
 </main></body></html>"""
     factor_header = "<table><thead><tr><th>#</th><th>Factor basket</th><th>Reversal</th><th>1W</th><th>1M</th><th>3M</th><th>RSI</th><th>RSI Δ1</th><th>RSI Accel</th><th>Inflect Names</th></tr></thead><tbody>"
