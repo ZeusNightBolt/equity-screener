@@ -118,6 +118,7 @@ with rsi_hist as (
     s.price_vs_sma50_pct,
     s.price_vs_sma200_pct,
     s.volume_vs_20d,
+    s.dollar_volume_20d_polygon,
     e.yf_forward_pe,
     e.yf_trailing_pe,
     e.yf_price_to_book,
@@ -281,50 +282,55 @@ def score_candidates(df: pd.DataFrame) -> pd.DataFrame:
     ).clip(0, 100)
     df["value_laggard_score"] = (0.45 * df["composite_value_score"] + 0.35 * df["peer_lag_score"] + 0.20 * df["near_low_score"]).clip(0, 100)
 
-    # ── Momentum Pullback Score ──
-    # Strong 6-month upward momentum + 1-2 week pullback + consolidating near
-    # moving averages.  This screen finds stocks like NBIS: strong multi-month
-    # uptrend that just sold off short-term and is coiling into SMAs — a
-    # continuation setup, not a reversal.
-    for c in ["ret_6m_pct", "ret_1w_pct", "price_vs_sma50_pct", "price_vs_sma200_pct"]:
+    # ── Momentum Pullback Score (relative-ranking based) ──
+    # Screens for stocks with the STRONGEST relative 6-month returns that
+    # have pulled back 1-2 weeks. Uses percentile ranking instead of
+    # absolute thresholds — works in both bull and bear markets. Volume
+    # is the primary gate: only stocks with meaningful institutional
+    # interest (top 60% by dollar volume and above-average relative volume)
+    # are considered.
+    for c in ["ret_6m_pct", "ret_1w_pct", "price_vs_sma50_pct", "price_vs_sma200_pct", "volume_vs_20d"]:
         df[c] = pd.to_numeric(df.get(c, np.nan), errors="coerce")
-    df["ret_6m_pct_score"] = pct_score(df["ret_6m_pct"], lower_is_better=False).fillna(50.0)
-    # Pullback depth: scored where 5-40% below 52w high (meaningful dip, not broken)
-    df["pullback_depth"] = (-df["from_52w_high_pct"]).clip(lower=0)
+    df["dollar_vol"] = pd.to_numeric(df.get("dollar_volume_20d_polygon", 0), errors="coerce").fillna(0)
+
+    # Volume gate: top 60% by dollar volume AND volume > 0.8x average
+    dollar_median = df["dollar_vol"].median()
+    df["has_institutional_flow"] = (df["dollar_vol"] > dollar_median) & (df["volume_vs_20d"] > 0.8)
+    # Relative momentum: percentile rank of 6-month return (higher = relatively stronger)
+    df["ret_6m_rank"] = pct_score(df["ret_6m_pct"], lower_is_better=False).fillna(50.0)
+    # Recent pullback: ret_1w < 0 and rank how deep (deeper = better entry)
+    df["pullback_depth"] = (-df["ret_1w_pct"]).clip(lower=0)
     df["pullback_score"] = pct_score(
-        df["pullback_depth"].where(df["pullback_depth"].between(5, 40)),
-        lower_is_better=False,
+        df["pullback_depth"].where(df["ret_1w_pct"].lt(0)), lower_is_better=False,
     ).fillna(0.0)
-    # Consolidation: proximity to SMA50 + SMA200 (closer → tighter coil)
+    # Consolidation: proximity to SMA50 + SMA200
     df["sma_proximity_score"] = (
         0.6 * pct_score(df["price_vs_sma50_pct"].abs(), lower_is_better=True).fillna(50.0)
         + 0.4 * pct_score(df["price_vs_sma200_pct"].abs(), lower_is_better=True).fillna(50.0)
     ).clip(0, 100)
-    # RSI cooling tent: peaks at ~45-50, decays toward 30 and 70
+    # RSI cool zone: 30-65, peaks at 45
     df["rsi_cool_score"] = np.where(
         df["rsi0"].between(30, 65),
-        (100.0 - abs(df["rsi0"] - 47.5) * 5.0).clip(0, 100),
+        (100.0 - abs(df["rsi0"] - 45.0) * 4.0).clip(0, 100),
         0.0,
     )
-    # Volume contraction during pullback (sub-1.0 = drying up)
-    df["vol_contract_score"] = pct_score(
-        df["volume_vs_20d"].clip(upper=1.5), lower_is_better=True,
-    ).fillna(50.0)
-    # Gate: must have momentum (6m >10%), recent pullback (1w <0%), off highs
+    # Volume intensity: above-average volume = more conviction
+    df["vol_intensity"] = pct_score(df["volume_vs_20d"].clip(upper=3.0), lower_is_better=False).fillna(50.0)
+
+    # Gate: institutional flow + pullback (no absolute momentum threshold)
     df["mom_pullback_eligible"] = (
-        df["ret_6m_pct"].gt(10)
+        df["has_institutional_flow"]
         & df["ret_1w_pct"].lt(0)
-        & df["from_52w_high_pct"].lt(-5)
         & df["rsi0"].between(30, 65)
     )
     df["momentum_pullback_score"] = np.where(
         df["mom_pullback_eligible"],
         (
-            0.30 * df["ret_6m_pct_score"]
+            0.25 * df["ret_6m_rank"]
             + 0.25 * df["pullback_score"]
             + 0.20 * df["sma_proximity_score"]
             + 0.15 * df["rsi_cool_score"]
-            + 0.10 * df["vol_contract_score"]
+            + 0.15 * df["vol_intensity"]
         ).clip(0, 100),
         0.0,
     )
