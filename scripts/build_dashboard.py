@@ -1468,7 +1468,7 @@ h2{margin-top:0}\n.mobile-cards{display:none}\n@media(max-width:768px){.tab-cont
 
 <div class="tab-content" id="c-rspb">
 {''.join(rs_pullback_cards)}
-<h2>🎯 Relative Strength Pullback sleeve</h2><p class="note"><span class="pill">RS Pullback</span> Winning-sector stocks with strong 3-month momentum that sold off sharply this week into support/demand zones. Gate: sector > 0%, stock outperformed sector, 1-week pullback < -3%, not broken (>30% above low). Scored by sector strength, relative strength, pullback depth, SMA proximity, and RSI reset.</p>{header}{''.join(rs_pullback_rows)}</tbody></table>
+<h2>Relative Strength Pullback sleeve</h2><p class="note"><span class="pill">RS Pullback</span> Winning-sector stocks with strong 3-month momentum that sold off sharply this week into support/demand zones. Gate: sector > 0%, stock outperformed sector, 1-week pullback < -3%, not broken (>30% above low). Scored by sector strength, relative strength, pullback depth, SMA proximity, and RSI reset.</p>{header}{''.join(rs_pullback_rows)}</tbody></table>
 </div>
 
 <div class="tab-content" id="c-master">
