@@ -317,6 +317,11 @@ def score_candidates(df: pd.DataFrame) -> pd.DataFrame:
     ).clip(0, 100)
     df["ev_master_eligible"] = df["ev_score"] >= 60
 
+    # Defragment before rank/groupby and rendering. The scoring engine creates many
+    # derived columns; a copy consolidates blocks so downstream rank/sort/render
+    # operations do not trigger pandas' high-fragmentation slow path.
+    df = df.copy()
+
     df["primary_strategy"] = df[SCORE_COLUMNS].idxmax(axis=1).map(SLEEVE_LABELS)
     df["rank_in_sector"] = df.groupby("sector")["opportunity_score"].rank(method="first", ascending=False).astype(int)
     df["global_rank"] = df["opportunity_score"].rank(method="first", ascending=False).astype(int)

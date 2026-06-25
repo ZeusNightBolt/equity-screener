@@ -211,7 +211,7 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
         for _, b in factor_baskets.iterrows():
             cls = " class='selected'" if str(b["basket_name"]) == selected_basket else ""
             factor_rows.append(
-                f"<tr{cls}><td>{int(b['rank'])}</td><td><strong>{html.escape(str(b['basket_name']))}</strong><small>{int(b['ticker_count'])} names under ${price_filter:.0f}</small></td>"
+                f"<tr{cls}><td>{int(b['rank'])}</td><td><strong>{html.escape(str(b['basket_name']))}</strong><small>{int(b['ticker_count'])} names under ${price_filter:.0f}</small><small class='basket-names'>{html.escape(str(b.get('top_names', '')))}</small></td>"
                 f"<td>{render_bar(b['factor_reversal_score'])}</td><td>{fmt_num(b['avg_ret_1w_pct'])}%</td><td>{fmt_num(b['avg_ret_1m_pct'])}%</td><td>{fmt_num(b['avg_ret_3m_pct'])}%</td>"
                 f"<td>{fmt_num(b['avg_rsi'])}</td><td>{fmt_num(b['avg_rsi_delta_1'])}</td><td>{fmt_num(b['avg_rsi_accel'])}</td><td>{int(b['inflection_count'])}</td></tr>"
             )
@@ -230,7 +230,7 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
         for _, b in theme_baskets.iterrows():
             cls = " class='selected'" if str(b["theme_name"]) == selected_theme else ""
             theme_rows.append(
-                f"<tr{cls}><td>{int(b['rank'])}</td><td><strong>{html.escape(str(b['theme_name']))}</strong><small>{int(b['ticker_count'])} names under ${price_filter:.0f}</small></td>"
+                f"<tr{cls}><td>{int(b['rank'])}</td><td><strong>{html.escape(str(b['theme_name']))}</strong><small>{int(b['ticker_count'])} names under ${price_filter:.0f}</small><small class='basket-names'>{html.escape(str(b.get('top_names', '')))}</small></td>"
                 f"<td>{render_bar(b['theme_reversal_score'])}</td><td>{fmt_num(b['avg_keyword_score'])}</td><td>{fmt_num(b['avg_ret_1w_pct'])}%</td><td>{fmt_num(b['avg_ret_1m_pct'])}%</td><td>{fmt_num(b['avg_ret_3m_pct'])}%</td>"
                 f"<td>{fmt_num(b['avg_rsi'])}</td><td>{fmt_num(b['avg_rsi_delta_1'])}</td><td>{fmt_num(b['avg_rsi_accel'])}</td><td>{int(b['inflection_count'])}</td></tr>"
             )

@@ -214,14 +214,14 @@
   {
     "ticker": "KMX",
     "cache_key": "web-v4:KMX:1782331200000:64.83:momentum pullback / wave 2-4",
-    "generated_at": "2026-06-25T19:20:42.418815+00:00",
+    "generated_at": "2026-06-25T23:06:06.779420+00:00",
     "input": {
       "ticker": "KMX",
       "company": "CarMax Inc.",
       "sector": "Consumer Discretionary",
       "industry": "Auto & Truck Dealerships",
       "primary_strategy": "momentum pullback / wave 2-4",
-      "price": 52.19,
+      "price": 52.7,
       "market_cap_bn": 5.99,
       "opportunity_score": 64.8,
       "rsi_value_score": 46.8,

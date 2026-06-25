@@ -4,6 +4,28 @@ import pandas as pd
 from .scoring import pct_score
 from .selection import cap_by_sector
 
+
+def _top_group_names(work: pd.DataFrame, group_col: str, max_names: int = 8) -> dict[str, str]:
+    """Return compact ticker/name lists for factor/theme basket summary rows."""
+    if work.empty or group_col not in work.columns:
+        return {}
+    out: dict[str, str] = {}
+    sort_cols = [c for c in ["opportunity_score", "ticker"] if c in work.columns]
+    sorted_work = work.sort_values(sort_cols, ascending=[False, True][:len(sort_cols)]) if sort_cols else work
+    for name, group in sorted_work.groupby(group_col, dropna=True):
+        labels = []
+        for _, row in group.head(max_names).iterrows():
+            ticker = str(row.get("ticker", "")).strip().upper()
+            company = str(row.get("company", "")).strip()
+            short_company = company[:28] + "…" if len(company) > 29 else company
+            if ticker and short_company and short_company.lower() != "nan":
+                labels.append(f"{ticker} — {short_company}")
+            elif ticker:
+                labels.append(ticker)
+        out[str(name)] = "; ".join(labels)
+    return out
+
+
 def factor_basket_analysis(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     if df.empty or "production_factor_basket" not in df.columns:
         return pd.DataFrame(), pd.DataFrame()
@@ -26,6 +48,8 @@ def factor_basket_analysis(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame
         inflection_count=("is_top_inflection", "sum"),
     ).reset_index().rename(columns={"production_factor_basket": "basket_name"})
     baskets = baskets[baskets["ticker_count"] >= 3].copy()
+    top_names = _top_group_names(work, "production_factor_basket")
+    baskets["top_names"] = baskets["basket_name"].astype(str).map(top_names).fillna("")
     if baskets.empty:
         return baskets, pd.DataFrame()
     baskets["lag_score"] = (
@@ -87,6 +111,8 @@ def keyword_theme_analysis(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame
         inflection_count=("is_top_inflection", "sum"),
     ).reset_index().rename(columns={"primary_keyword_factor": "theme_name"})
     themes = themes[themes["ticker_count"] >= 3].copy()
+    top_names = _top_group_names(work, "primary_keyword_factor")
+    themes["top_names"] = themes["theme_name"].astype(str).map(top_names).fillna("")
     if themes.empty:
         return themes, pd.DataFrame()
     themes["lag_score"] = (
