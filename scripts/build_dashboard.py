@@ -496,7 +496,7 @@ def call_llm(prompt: str) -> str:
             "Authorization": f"Bearer {openrouter_key}",
             "Content-Type": "application/json",
             "HTTP-Referer": "https://github.com/ZeusNightBolt/equity-screener",
-            "X-Title": "RSI Value Opportunities Dashboard",
+            "X-Title": "Equity Screener",
         }
         model = "deepseek/deepseek-chat-v3-0324"
     else:
@@ -1505,7 +1505,7 @@ def git_commit_push() -> None:
     if not status:
         print("git: no changes to commit")
         return
-    subprocess.run(["git", "commit", "-m", "Update RSI value opportunities dashboard"], cwd=PROJECT_DIR, check=True)
+    subprocess.run(["git", "commit", "-m", "Update Equity Screener dashboard"], cwd=PROJECT_DIR, check=True)
     remotes = subprocess.run(["git", "remote"], cwd=PROJECT_DIR, text=True, capture_output=True, check=True).stdout.strip().splitlines()
     if "origin" in remotes:
         subprocess.run(["git", "push", "origin", "main"], cwd=PROJECT_DIR, check=True)

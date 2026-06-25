@@ -49,7 +49,7 @@ db.close()
 # Step 3: Build + deploy dashboard
 echo ""
 echo "── Step 3: Build + deploy dashboard ──"
-cd /home/nima/rsi-value-opportunities
+cd /home/nima/equity-screener
 /usr/bin/python3 scripts/build_dashboard.py --price-filter 75 --top-llm 10 --push
 
 echo ""

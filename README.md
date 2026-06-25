@@ -1,4 +1,4 @@
-# RSI Value Opportunities Dashboard
+# Equity Screener
 
 Daily dashboard for low-priced, $5B+ market-cap stocks ranked by:
 
