@@ -1,23 +1,38 @@
 # Equity Screener
 
-Daily dashboard for low-priced, $5B+ market-cap stocks ranked by:
+Daily GitHub Pages dashboard for low-priced, $5B+ market-cap stocks ranked by six deterministic sleeves plus an EV master score.
 
-- Composite value score from local Polygon/DuckDB warehouse enrichment fields.
-- 4-hour RSI acceleration, weighted highest when RSI inflects from a prior grind lower into a sharp rise.
-- Price filter: latest 4-hour close below `$50`.
+## What it does
 
-The dashboard is generated locally from `~/market-data/market_data.duckdb` and deployed as a static GitHub Pages site from `docs/`.
+- Queries the local Polygon/DuckDB warehouse at `~/market-data/market_data.duckdb`.
+- Scores candidates across RSI inflection/value, squeeze laggard, value laggard, momentum pullback, relative-strength pullback, and RSI breakout sleeves.
+- Builds static HTML/JSON outputs in `docs/` for GitHub Pages.
+- Optionally adds web/LLM commentary for the diversified top names.
 
 ## Run
 
 ```bash
-/usr/bin/python3 scripts/build_dashboard.py --price-filter 50 --top-llm 10
+/usr/bin/python3 scripts/build_dashboard.py --price-filter 75 --no-llm
 ```
 
-Environment:
+Production cron uses:
+
+```bash
+/usr/bin/bash run_daily.sh
+```
+
+## Key docs
+
+- Architecture and audit: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+- Dashboard: [`docs/index.html`](docs/index.html)
+- Data payload: [`docs/dashboard_data.json`](docs/dashboard_data.json)
+
+## Environment
 
 - `DEEPSEEK_API_KEY` in `~/.hermes/.env` for direct DeepSeek API calls.
 - `OPENROUTER_API_KEY` optional fallback if direct DeepSeek is unavailable.
+- `TAVILY_API_KEY` optional for commentary search.
+- `SEARXNG_URL` optional; defaults to `http://localhost:8888`.
 
 No API keys or warehouse data are committed.
 

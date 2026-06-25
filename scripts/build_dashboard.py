@@ -24,6 +24,66 @@ ENV_PATH = Path.home() / ".hermes" / ".env"
 DOCS_DIR = PROJECT_DIR / "docs"
 DATA_DIR = PROJECT_DIR / "data"
 
+SCORE_COLUMNS = [
+    "rsi_value_score",
+    "squeeze_laggard_score",
+    "value_laggard_score",
+    "momentum_pullback_score",
+    "rel_strength_pullback_score",
+    "inflect_breakout_score",
+]
+
+SLEEVE_LABELS = {
+    "rsi_value_score": "RSI inflection + value",
+    "squeeze_laggard_score": "shorted near lows / peer lag",
+    "value_laggard_score": "cheap peer laggard",
+    "momentum_pullback_score": "momentum pullback",
+    "rel_strength_pullback_score": "relative strength pullback",
+    "inflect_breakout_score": "RSI breakout inflection",
+}
+
+SCORE_DISPLAY = [
+    ("Opp", "opportunity_score", ""),
+    ("RSI", "rsi_value_score", "hot"),
+    ("Sqz", "squeeze_laggard_score", "short"),
+    ("Val", "value_laggard_score", "value"),
+    ("Momo", "momentum_pullback_score", "mom"),
+    ("RS Pb", "rel_strength_pullback_score", "rs"),
+    ("Brk", "inflect_breakout_score", "brk"),
+]
+
+DIVERSIFIED_TOP_PLAN = [
+    ("opportunity_score", 2),
+    ("rsi_value_score", 1),
+    ("squeeze_laggard_score", 2),
+    ("value_laggard_score", 2),
+    ("momentum_pullback_score", 1),
+    ("rel_strength_pullback_score", 1),
+    ("inflect_breakout_score", 1),
+]
+
+COLOR_RGB = {
+    "hot": "64,196,99",
+    "value": "181,140,255",
+    "short": "71,215,255",
+    "mom": "255,92,92",
+    "rs": "255,165,0",
+    "brk": "0,206,209",
+}
+
+GIT_TRACKED_OUTPUTS = [
+    "README.md",
+    ".gitignore",
+    "run_daily.sh",
+    "scripts/build_dashboard.py",
+    "docs/index.html",
+    "docs/factor-baskets.html",
+    "docs/dashboard_data.json",
+    "data/dashboard_data.json",
+    "data/llm_analysis.json",
+    "data/scored_candidates.csv",
+]
+
 
 def load_env_file(path: Path) -> None:
     if not path.exists():
@@ -188,15 +248,17 @@ def cap_by_sector(df: pd.DataFrame, score_col: str, limit: int, per_sector_cap: 
 
 
 def build_diversified_top10(df: pd.DataFrame, per_sector_cap: int = 3) -> pd.DataFrame:
-    """Blend multiple opportunity sleeves; do not let RSI monopolize the top 10."""
+    """Blend opportunity sleeves so no single strategy monopolizes the top 10."""
     if df.empty:
         return df.copy()
     sector_counts = {}
     picked = []
     picked_set = set()
+    picked_source = {}
 
     def add_from(frame: pd.DataFrame, score_col: str, quota: int) -> None:
         nonlocal picked, picked_set, sector_counts
+        added = 0
         for idx, row in frame.sort_values(score_col, ascending=False).iterrows():
             if idx in picked_set:
                 continue
@@ -205,28 +267,27 @@ def build_diversified_top10(df: pd.DataFrame, per_sector_cap: int = 3) -> pd.Dat
                 continue
             picked.append(idx)
             picked_set.add(idx)
+            picked_source[idx] = score_col
             sector_counts[sector] = sector_counts.get(sector, 0) + 1
-            if len([i for i in picked if i in frame.index]) >= quota or len(picked) >= 10:
+            added += 1
+            if added >= quota or len(picked) >= 10:
                 break
 
-    # 4 best all-around, 3 short/lows/peer-lag, 3 value-laggards,
-    # 3 momentum pullbacks, 3 rel-strength pullbacks, 2 RSI breakout/inflection.
-    # Fill any remaining by overall score.
-    add_from(df, "opportunity_score", 4)
-    add_from(df, "squeeze_laggard_score", 7)
-    add_from(df, "value_laggard_score", 10)
-    add_from(df, "momentum_pullback_score", 10)
-    add_from(df, "rel_strength_pullback_score", 10)
-    add_from(df, "inflect_breakout_score", 10)
+    for score_col, quota in DIVERSIFIED_TOP_PLAN:
+        add_from(df, score_col, quota)
+        if len(picked) >= 10:
+            break
     add_from(df, "opportunity_score", 10)
     out = df.loc[picked[:10]].copy()
+    out["diversified_source"] = [SLEEVE_LABELS[picked_source[idx]] if picked_source[idx] in SLEEVE_LABELS else "overall opportunity" for idx in out.index]
     out["portfolio_rank"] = range(1, len(out) + 1)
     return out
 
 
 def score_candidates(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
-        return df
+        return df.copy()
+    df = df.copy()
     for col in ["yf_forward_pe", "yf_trailing_pe", "yf_price_to_book", "yf_peg_ratio"]:
         df.loc[df[col].astype(float) <= 0, col] = np.nan
 
@@ -396,7 +457,6 @@ def score_candidates(df: pd.DataFrame) -> pd.DataFrame:
         0.0,
     )
 
-    score_cols = ["rsi_value_score", "squeeze_laggard_score", "value_laggard_score", "momentum_pullback_score", "rel_strength_pullback_score", "inflect_breakout_score"]
     # Catches stocks where RSI is turning up from the 40-60 mid-range
     # with expanding volume and sector tailwind — the early stage of
     # a breakout, not a laggard reversal.
@@ -429,21 +489,15 @@ def score_candidates(df: pd.DataFrame) -> pd.DataFrame:
         0.0,
     )
 
-    score_cols = ["rsi_value_score", "squeeze_laggard_score", "value_laggard_score", "momentum_pullback_score", "rel_strength_pullback_score", "inflect_breakout_score"]
-    df["opportunity_score"] = df[score_cols].max(axis=1)
+    df["opportunity_score"] = df[SCORE_COLUMNS].max(axis=1)
 
     # ── EV Master Score ──
     # High-expected-value stocks: strong signals with cross-sleeve agreement
     # and asymmetric risk/reward.  Combines signal strength, conviction,
     # payoff asymmetry, and factor alignment into a single 0-100 score.
     df["sleeve_rank_agreement"] = (
-        (pct_score(df["rsi_value_score"], lower_is_better=False).fillna(0)
-         + pct_score(df["squeeze_laggard_score"], lower_is_better=False).fillna(0)
-         + pct_score(df["value_laggard_score"], lower_is_better=False).fillna(0)
-         + pct_score(df["momentum_pullback_score"], lower_is_better=False).fillna(0)
-         + pct_score(df["rel_strength_pullback_score"], lower_is_better=False).fillna(0)
-         + pct_score(df["inflect_breakout_score"], lower_is_better=False).fillna(0))
-        / 6.0  # average percentile across all 6 sleeves
+        sum(pct_score(df[col], lower_is_better=False).fillna(0) for col in SCORE_COLUMNS)
+        / len(SCORE_COLUMNS)
     ).clip(0, 100)
     # Asymmetric R:R: upside room (distance to 52w high) vs downside floor (distance to 52w low)
     df["upside_potential"] = (-df["from_52w_high_pct"]).clip(lower=5, upper=100)
@@ -466,16 +520,7 @@ def score_candidates(df: pd.DataFrame) -> pd.DataFrame:
     ).clip(0, 100)
     df["ev_master_eligible"] = df["ev_score"] >= 60
 
-    score_cols = ["rsi_value_score", "squeeze_laggard_score", "value_laggard_score", "momentum_pullback_score", "rel_strength_pullback_score", "inflect_breakout_score"]
-    labels = {
-        "rsi_value_score": "RSI inflection + value",
-        "squeeze_laggard_score": "shorted near lows / peer lag",
-        "value_laggard_score": "cheap peer laggard",
-        "momentum_pullback_score": "momentum pullback",
-        "rel_strength_pullback_score": "relative strength pullback",
-        "inflect_breakout_score": "RSI breakout inflection",
-    }
-    df["primary_strategy"] = df[score_cols].idxmax(axis=1).map(labels)
+    df["primary_strategy"] = df[SCORE_COLUMNS].idxmax(axis=1).map(SLEEVE_LABELS)
     df["rank_in_sector"] = df.groupby("sector")["opportunity_score"].rank(method="first", ascending=False).astype(int)
     df["global_rank"] = df["opportunity_score"].rank(method="first", ascending=False).astype(int)
     df["is_top_inflection"] = (df["inflection_flag"] == 1) & (df["rsi_delta_1"] > 0) & (df["rsi_accel"] > 0)
@@ -827,6 +872,7 @@ def clean_float(value):
 def record(row) -> dict:
     keys = [
         "global_rank", "rank_in_sector", "sector", "ticker", "company", "market_cap", "four_h_close", "display_close", "price_source", "latest_daily_close",
+        "diversified_source",
         "opportunity_score", "rsi_value_score", "squeeze_laggard_score", "value_laggard_score", "momentum_pullback_score", "inflect_breakout_score", "ev_score",
         "rsi_acceleration_score", "composite_value_score", "rsi0", "rsi1", "rsi2", "rsi3", "rsi4", "rsi5", "rsi_delta_1",
         "prior_delta_3_avg", "rsi_accel", "inflection_flag", "yf_forward_pe", "yf_trailing_pe",
@@ -840,7 +886,7 @@ def record(row) -> dict:
     out = {}
     for key in keys:
         value = row.get(key)
-        if key in {"sector", "ticker", "company", "value_grade", "growth_grade", "momentum_grade", "primary_strategy", "production_factor_basket", "production_theme", "primary_keyword_factor", "keyword_factor_baskets"}:
+        if key in {"sector", "ticker", "company", "value_grade", "growth_grade", "momentum_grade", "primary_strategy", "diversified_source", "production_factor_basket", "production_theme", "primary_keyword_factor", "keyword_factor_baskets"}:
             out[key] = None if pd.isna(value) else str(value)
         elif key in {"four_h_timestamp", "latest_daily_timestamp"}:
             out[key] = str(value)
@@ -872,15 +918,9 @@ def fmt_bn(value):
 def render_bar(value, cls=""):
     """Full-width gradient bar filling the cell."""
     v = 0 if value is None or (isinstance(value, float) and math.isnan(value)) else max(0, min(100, float(value)))
-    color_map = {"hot": "var(--green)", "value": "var(--purple)", "short": "var(--cyan)", "mom": "var(--red)"}
+    color_map = {"hot": "var(--green)", "value": "var(--purple)", "short": "var(--cyan)", "mom": "var(--red)", "rs": "#ffa500", "brk": "#00ced1"}
     color = color_map.get(cls, "var(--amber)")
     return f'<div class="score-bar" style="--bar-pct:{v:.0f}%;--bar-color:{color}"><span class="bar-fill"></span><span class="bar-score">{v:.0f}</span></div>'
-
-
-def score_heatmap(value):
-    """Return CSS opacity for heatmap cell background (0-1 based on 0-100 score)."""
-    v = 0 if value is None or (isinstance(value, float) and math.isnan(value)) else max(0, min(100, float(value)))
-    return f"hs-background:{v / 100:.2f}"
 
 
 def render_score_cell(value, cls=""):
@@ -888,7 +928,7 @@ def render_score_cell(value, cls=""):
     v = 0 if value is None or (isinstance(value, float) and math.isnan(value)) else max(0, min(100, float(value)))
     opacity = v / 100
     # Heatmap: dark amber-to-color gradient background with opacity proportional to score
-    color_rgb = {"hot": "64,196,99", "value": "181,140,255", "short": "71,215,255", "mom": "255,92,92"}.get(cls, "230,180,34")
+    color_rgb = COLOR_RGB.get(cls, "230,180,34")
     bg_alpha = 0.04 + opacity * 0.10  # subtle range 4%-14%
     return (
         f'<td class="score-td" style="background:rgba({color_rgb},{bg_alpha:.3f});--bar-pct:{v:.0f}%;--bar-color:rgb({color_rgb})">'
@@ -976,50 +1016,6 @@ def render_rank_badge(r):
     if rank == 1:
         return '<span class="rank-badge" title="#1 in sector">🏆</span>'
     return ""
-
-
-def render_mobile_card(r, rank_field="global_rank"):
-    """Compact vertical card for mobile: ticker, price, all scores stacked."""
-    badge = render_rank_badge(r)
-    rank = int(r[rank_field]) if rank_field in r and not pd.isna(r[rank_field]) else ""
-    rows = []
-    rows.append(f'<div class="mobile-card">')
-    rows.append(f'<div class="mc-head"><span class="mc-rank">{badge}#{rank}</span><a class="ticker-link" href="{finviz_url(r["ticker"])}" target="_blank" rel="noopener noreferrer">{html.escape(str(r["ticker"]))}</a><span class="mc-ticker">${fmt_money(r["display_close"])}</span></div>')
-    rows.append(f'<div class="mc-company">{html.escape(str(r.get("company",""))[:60])}</div>')
-    rows.append(f'<div class="mc-meta">{html.escape(str(r.get("sector","")))}{" · " + html.escape(str(r.get("primary_strategy",""))) if r.get("primary_strategy") else ""} · {fmt_bn(r["market_cap"])}</div>')
-    # Stack all scores vertically with full-width bars
-    scores = [
-        ("Opp", r.get("opportunity_score"), ""),
-        ("RSI", r.get("rsi_value_score"), "hot"),
-        ("Sqz", r.get("squeeze_laggard_score"), "short"),
-        ("Val", r.get("value_laggard_score"), "value"),
-        ("Momo", r.get("momentum_pullback_score"), "mom"),
-        ("RS Pb", r.get("rel_strength_pullback_score"), "rs"),
-        ("Brk", r.get("inflect_breakout_score"), "brk"),
-    ]
-    rows.append('<div class="mc-scores">')
-    for label, val, cls in scores:
-        v = 0 if val is None or (isinstance(val, float) and math.isnan(val)) else max(0, min(100, float(val)))
-        color_rgb = {"hot":"64,196,99","value":"181,140,255","short":"71,215,255","mom":"255,92,92","rs":"255,165,0","brk":"0,206,209"}.get(cls, "230,180,34")
-        rows.append(f'<div class="mc-score-row"><span class="mc-label">{label}</span><span class="bar {cls}"><i style="width:{v:.0f}%;background:rgb({color_rgb})"></i></span><b>{v:.0f}</b></div>')
-    rows.append('</div>')
-    # Details row: RSI, short float, from low
-    rsi0 = r.get("rsi0")
-    rsi_str = f"RSI {float(rsi0):.0f}" if rsi0 is not None and not (isinstance(rsi0, float) and math.isnan(rsi0)) else "RSI —"
-    short = r.get("short_pct_float")
-    short_str = f"Short {float(short):.1f}%" if short is not None and not (isinstance(short, float) and math.isnan(short)) else ""
-    from_low = r.get("from_52w_low_pct")
-    low_str = f"From low {float(from_low):.0f}%" if from_low is not None and not (isinstance(from_low, float) and math.isnan(from_low)) else ""
-    rows.append(f'<div class="mc-details">{rsi_str}{" · "+short_str if short_str else ""}{" · "+low_str if low_str else ""}</div>')
-    rows.append('</div>')
-    return "".join(rows)
-
-
-def mobile_section(heading, rows_list):
-    """Wrap a list of mobile card HTML strings in a section."""
-    if not rows_list:
-        return ""
-    return f'<div class="mobile-cards"><h2>{heading}</h2>{"".join(rows_list)}</div>'
 
 
 def finviz_url(ticker: str) -> str:
@@ -1231,26 +1227,12 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
             f"<td>{fmt_bn(r['market_cap'])}</td>"
             f"{render_score_cell(r['opportunity_score'])}"
             f"{render_rsi_cell(r)}"
-            f"<td class='master-comparison'>"
-            f"<div class='master-comp-row'>"
-            f"<span class='comp-label'>RSI</span>{render_bar(r.get('rsi_value_score'), 'hot')}"
-            f"</div>"
-            f"<div class='master-comp-row'>"
-            f"<span class='comp-label'>Sqz</span>{render_bar(r.get('squeeze_laggard_score'), 'short')}"
-            f"</div>"
-            f"<div class='master-comp-row'>"
-            f"<span class='comp-label'>Val</span>{render_bar(r.get('value_laggard_score'), 'value')}"
-            f"</div>"
-            f"<div class='master-comp-row'>"
-            f"<span class='comp-label'>Mom</span>{render_bar(r.get('momentum_pullback_score'), 'mom')}"
-            f"</div>"
-            f"<div class='master-comp-row'>"
-            f"<span class='comp-label'>RS</span>{render_bar(r.get('rel_strength_pullback_score'), 'rs')}"
-            f"</div>"
-            f"<div class='master-comp-row'>"
-            f"<span class='comp-label'>Brk</span>{render_bar(r.get('inflect_breakout_score'), 'brk')}"
-            f"</div>"
-            f"</td>"
+            "<td class='master-comparison'>"
+            + "".join(
+                f"<div class='master-comp-row'><span class='comp-label'>{label}</span>{render_bar(r.get(score_col), cls)}</div>"
+                for label, score_col, cls in SCORE_DISPLAY[1:]
+            )
+            + "</td>"
             f"<td>{render_sparkline(r)}</td>"
             f"<td>{fmt_num(r.get('short_pct_float'))}%</td>"
             f"<td>{fmt_num(r.get('peer_lag_1m_pct'))}%</td>"
@@ -1283,13 +1265,11 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
             f"</div>"
             f"<div class='mc-meta'><span>{sector}</span> &middot; <span>{price}</span> &middot; <span>{mcap}</span></div>"
             f"<div class='mc-scores'>"
-            f"<div class='mc-score-row'><span class='mc-label'>Opp</span>{_score_bar(r['opportunity_score'])}</div>"
-            f"<div class='mc-score-row'><span class='mc-label'>RSI</span>{_score_bar(r.get('rsi_value_score'), 'hot')}</div>"
-            f"<div class='mc-score-row'><span class='mc-label'>Sqz</span>{_score_bar(r.get('squeeze_laggard_score'), 'short')}</div>"
-            f"<div class='mc-score-row'><span class='mc-label'>Val</span>{_score_bar(r.get('value_laggard_score'), 'value')}</div>"
-            f"<div class='mc-score-row'><span class='mc-label'>Mom</span>{_score_bar(r.get('momentum_pullback_score'), 'mom')}</div>"
-            f"<div class='mc-score-row'><span class='mc-label'>Brk</span>{_score_bar(r.get('inflect_breakout_score'), 'brk')}</div>"
-            f"</div>"
+            + "".join(
+                f"<div class='mc-score-row'><span class='mc-label'>{label}</span>{_score_bar(r.get(score_col), cls)}</div>"
+                for label, score_col, cls in SCORE_DISPLAY
+            )
+            + f"</div>"
             f"<div class='mc-details'>"
             f"<span>RSI {rsi_str}</span> &middot; "
             f"<span>Shrt {fmt_num(r.get('short_pct_float'))}%</span> &middot; "
@@ -1321,7 +1301,6 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
     rs_pullback_cards = [card_html(r) for _, r in rs_pullbacks.iterrows()]
     master_rows = [master_row_html(r) for _, r in master_ev.iterrows()]
     master_cards = [card_html(r) for _, r in master_ev.iterrows()]
-    top_cards = [card_html(r) for _, r in top.iterrows()]
 
     analysis_cards = []
     for item in analyses:
@@ -1412,7 +1391,7 @@ h2{margin-top:0}\n.mobile-cards{display:none}\n@media(max-width:768px){.tab-cont
 <title>Equity Screener</title><style>{css}</style></head>
 <body><header><h1>EQUITY SCREENER</h1><div class="status"><span class="dot">● LIVE</span><span>generated {html.escape(now_et.strftime('%Y-%m-%d %H:%M %Z'))}</span><span>latest 4h {html.escape(latest_ts)}</span><span>price &lt; ${price_filter:.0f}</span><span>{len(df)} names / {df['sector'].nunique() if not df.empty else 0} sectors</span><span>top 10 capped at max 3/sector</span></div><nav class="nav"><a class="active" href="index.html">Opportunities</a><a href="factor-baskets.html">Factor basket inflections</a></nav></header>
 <main>
-<div class="note"><span class="pill">Method</span> Multi-sleeve rank: RSI inflection + value, shorted-near-lows / peer lag, cheap peer laggards, momentum pullbacks, and RSI breakout/inflection. The top 10 blends five sleeves and is diversified with a hard cap of 3 stocks per sector. RSI breakout catches stocks where RSI is turning up from the 40-60 mid-range with expanding volume and sector tailwind — the early stage of a breakout. Momentum pullbacks scan for strong 6-month uptrends that have pulled back 1-2 weeks and are coiling into moving averages — a continuation setup.</div>
+<div class="note"><span class="pill">Method</span> Multi-sleeve rank: RSI inflection + value, shorted-near-lows / peer lag, cheap peer laggards, momentum pullbacks, and RSI breakout/inflection. The top 10 blends six sleeves and is diversified with a hard cap of 3 stocks per sector. RSI breakout catches stocks where RSI is turning up from the 40-60 mid-range with expanding volume and sector tailwind — the early stage of a breakout. Momentum pullbacks scan for strong 6-month uptrends that have pulled back 1-2 weeks and are coiling into moving averages — a continuation setup.</div>
 
 <!-- Tab radio inputs -->
 <input type="radio" name="tab" id="tab-opps" checked>
@@ -1468,7 +1447,7 @@ h2{margin-top:0}\n.mobile-cards{display:none}\n@media(max-width:768px){.tab-cont
 
 <div class="tab-content" id="c-rspb">
 {''.join(rs_pullback_cards)}
-<h2>Relative Strength Pullback sleeve</h2><p class="note"><span class="pill">RS Pullback</span> Winning-sector stocks with strong 3-month momentum that sold off sharply this week into support/demand zones. Gate: sector > 0%, stock outperformed sector, 1-week pullback < -3%, not broken (>30% above low). Scored by sector strength, relative strength, pullback depth, SMA proximity, and RSI reset.</p>{header}{''.join(rs_pullback_rows)}</tbody></table>
+<h2>Relative Strength Pullback sleeve</h2><p class="note"><span class="pill">RS Pullback</span> Winning-sector stocks with strong 3-month momentum that sold off sharply this week into support/demand zones. Gate: sector 1-month return > -2%, stock near sector 3-month momentum, 1-week pullback < -1%, and not too extended from the 52-week low (<40%). Scored by sector strength, relative strength, pullback depth, SMA proximity, and RSI reset.</p>{header}{''.join(rs_pullback_rows)}</tbody></table>
 </div>
 
 <div class="tab-content" id="c-master">
@@ -1500,7 +1479,7 @@ h2{margin-top:0}\n.mobile-cards{display:none}\n@media(max-width:768px){.tab-cont
     (DOCS_DIR / "index.html").write_text(content)
 
 def git_commit_push() -> None:
-    subprocess.run(["git", "add", "README.md", ".gitignore", "run_daily.sh", "scripts/build_dashboard.py", "docs/index.html", "docs/factor-baskets.html", "docs/dashboard_data.json", "data/dashboard_data.json", "data/llm_analysis.json", "data/scored_candidates.csv"], cwd=PROJECT_DIR, check=True)
+    subprocess.run(["git", "add", *GIT_TRACKED_OUTPUTS], cwd=PROJECT_DIR, check=True)
     status = subprocess.run(["git", "status", "--porcelain"], cwd=PROJECT_DIR, text=True, capture_output=True, check=True).stdout.strip()
     if not status:
         print("git: no changes to commit")
@@ -1508,7 +1487,10 @@ def git_commit_push() -> None:
     subprocess.run(["git", "commit", "-m", "Update Equity Screener dashboard"], cwd=PROJECT_DIR, check=True)
     remotes = subprocess.run(["git", "remote"], cwd=PROJECT_DIR, text=True, capture_output=True, check=True).stdout.strip().splitlines()
     if "origin" in remotes:
-        subprocess.run(["git", "push", "origin", "main"], cwd=PROJECT_DIR, check=True)
+        branch = subprocess.run(["git", "branch", "--show-current"], cwd=PROJECT_DIR, text=True, capture_output=True, check=True).stdout.strip()
+        if not branch:
+            branch = "HEAD"
+        subprocess.run(["git", "push", "origin", branch], cwd=PROJECT_DIR, check=True)
 
 
 def main() -> int:
