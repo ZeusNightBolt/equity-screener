@@ -59,7 +59,8 @@ Wave-stage counts after adding an ambiguity margin:
 
 | Finding | Fix |
 |---|---|
-| `wave_setup_score` was upward-biased because it was the raw max of four stage scores. | Replaced raw max with `0.72 * top_stage + 0.28 * second_stage`, with a small ambiguity penalty when the top-stage margin is under 5 points. |
+| `wave_setup_score` was upward-biased because it was the raw max of four stage scores. | Replaced raw max with `0.72 * top_stage + 0.28 * second_stage`, with a small ambiguity penalty when the top-stage margin is under 5 points. Also removed `wave_setup_score` from `SCORE_COLUMNS` so it no longer directly dominates `opportunity_score`. |
+| `momentum_leader_score` conflated trend quality with actionable setup signals when included in the opportunity max. | Kept it as a visible factor and dedicated Leaders tab, but removed it from `SCORE_COLUMNS`; diversified selection can still reserve leader exposure without making trend quality the primary opportunity score. |
 | Noisy `idxmax` stage labels when two stages were almost tied. | Added `wave_stage_margin`; labels become `Mixed / transition` when margin is under 3 points. |
 | Pullback presence had a discontinuity around 0% one-week return. | Replaced binary negative-week logic with a continuous score: mild pullbacks get high scores, chase strength decays gradually. |
 | Distribution/exhaustion risk was binary and weak. | Replaced with a continuous penalty based on 52-week price position, hot RSI, and positive one-week chase. |
