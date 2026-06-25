@@ -124,7 +124,7 @@ class BuildDashboardContractTest(unittest.TestCase):
             'class="site-hero"',
             'class="rail"',
             'class="kpi-strip"',
-            'Trader cockpit, not a spreadsheet',
+            'Signal methodology',
             'Factor / theme map',
         ]:
             self.assertIn(marker, index)
@@ -134,6 +134,59 @@ class BuildDashboardContractTest(unittest.TestCase):
         self.assertNotIn('{{D_DATA}}', index)
         self.assertNotIn('__DATA_PLACEHOLDER__', index)
         self.assertNotIn('(top10)', index)
+        self.assertNotIn('Trader cockpit, not a spreadsheet', index)
+        self.assertNotIn('Jekyll-compatible static theme surface', factor)
+
+    def test_score_candidates_populates_defined_momentum_rs_and_wave_factors(self):
+        df = pd.DataFrame({
+            'sector': ['A', 'A', 'B', 'B', 'C', 'C'],
+            'ticker': [f'X{i}' for i in range(6)],
+            'yf_forward_pe': [10, 12, 18, 25, 8, 30],
+            'yf_trailing_pe': [12, 15, 20, 28, 10, 35],
+            'yf_price_to_book': [1.2, 1.5, 2.0, 3.0, 1.1, 4.0],
+            'yf_peg_ratio': [1.0, 1.2, 1.5, 2.0, 0.8, 2.5],
+            'dolt_value_score': [5, 6, 4, 3, 7, 2],
+            'value_grade': ['C', 'B', 'C', 'D', 'A', 'D'],
+            'short_pct_float': [2, 8, 12, 4, 15, 6],
+            'from_52w_low_pct': [15, 35, 70, 25, 10, 120],
+            'from_52w_high_pct': [-45, -20, -8, -35, -55, -2],
+            'ret_1w_pct': [-2, 3, -5, 1, -8, 4],
+            'ret_1m_pct': [4, 8, 16, -3, -12, 30],
+            'ret_3m_pct': [8, 20, 45, -5, -20, 80],
+            'ret_6m_pct': [12, 35, 70, -10, -30, 120],
+            'ret_ytd_pct': [5, 15, 30, -8, -20, 60],
+            'price_vs_sma20_pct': [-1, 2, 6, -3, -8, 12],
+            'price_vs_sma50_pct': [0, 4, 10, -5, -15, 18],
+            'price_vs_sma200_pct': [5, 15, 35, -12, -30, 60],
+            'volume_vs_20d': [0.9, 1.1, 1.5, 0.7, 2.0, 1.3],
+            'dollar_volume_20d_polygon': [0]*6,
+            'rsi0': [42, 58, 64, 38, 30, 72],
+            'rsi1': [40, 55, 60, 39, 32, 68],
+            'rsi2': [41, 52, 58, 41, 35, 64],
+            'rsi3': [42, 50, 55, 43, 38, 60],
+            'rsi4': [43, 48, 52, 45, 40, 57],
+            'rsi5': [44, 47, 50, 46, 42, 55],
+            'rsi_delta_1': [2, 3, 4, -1, -2, 4],
+            'prior_delta_3_avg': [-1, 2, 3, -2, -3, 4],
+            'rsi_accel': [3, 1, 1, 1, 1, 0],
+            'inflection_flag': [1, 0, 0, 0, 0, 0],
+            'sentiment_score': [0]*6,
+            'growth_grade': ['C']*6,
+            'momentum_grade': ['C']*6,
+            'production_factor_basket': ['x']*6,
+            'production_factor_score': [50]*6,
+            'production_theme': ['theme']*6,
+            'primary_keyword_factor': ['kw']*6,
+            'primary_keyword_factor_score': [50]*6,
+            'keyword_factor_baskets': ['[]']*6,
+        })
+        scored = build_dashboard.score_candidates(df)
+        for col in ['momentum_leader_score', 'momentum_pullback_score', 'rel_strength_pullback_score', 'inflect_breakout_score', 'wave_setup_score']:
+            self.assertTrue(scored[col].notna().all(), col)
+            self.assertTrue(scored[col].between(0, 100).all(), col)
+            self.assertGreater(scored[col].min(), 0, col)
+        self.assertIn('wave_stage', scored)
+        self.assertTrue(scored['wave_stage'].notna().all())
 
 
 if __name__ == '__main__':
