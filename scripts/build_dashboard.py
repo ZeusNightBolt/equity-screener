@@ -29,18 +29,22 @@ SCORE_COLUMNS = [
     "rsi_value_score",
     "squeeze_laggard_score",
     "value_laggard_score",
+    "momentum_leader_score",
     "momentum_pullback_score",
     "rel_strength_pullback_score",
     "inflect_breakout_score",
+    "wave_setup_score",
 ]
 
 SLEEVE_LABELS = {
     "rsi_value_score": "RSI inflection + value",
     "squeeze_laggard_score": "shorted near lows / peer lag",
     "value_laggard_score": "cheap peer laggard",
-    "momentum_pullback_score": "momentum pullback",
+    "momentum_leader_score": "momentum leader / wave 3",
+    "momentum_pullback_score": "momentum pullback / wave 2-4",
     "rel_strength_pullback_score": "relative strength pullback",
     "inflect_breakout_score": "RSI breakout inflection",
+    "wave_setup_score": "wave-stage setup",
 }
 
 SCORE_DISPLAY = [
@@ -48,19 +52,23 @@ SCORE_DISPLAY = [
     ("RSI", "rsi_value_score", "hot"),
     ("Sqz", "squeeze_laggard_score", "short"),
     ("Val", "value_laggard_score", "value"),
+    ("Lead", "momentum_leader_score", "lead"),
     ("Momo", "momentum_pullback_score", "mom"),
-    ("RS Pb", "rel_strength_pullback_score", "rs"),
+    ("RS", "rel_strength_pullback_score", "rs"),
     ("Brk", "inflect_breakout_score", "brk"),
+    ("Wave", "wave_setup_score", "wave"),
 ]
 
 DIVERSIFIED_TOP_PLAN = [
-    ("opportunity_score", 2),
+    ("opportunity_score", 1),
     ("rsi_value_score", 1),
-    ("squeeze_laggard_score", 2),
-    ("value_laggard_score", 2),
+    ("squeeze_laggard_score", 1),
+    ("value_laggard_score", 1),
+    ("momentum_leader_score", 2),
     ("momentum_pullback_score", 1),
     ("rel_strength_pullback_score", 1),
     ("inflect_breakout_score", 1),
+    ("wave_setup_score", 1),
 ]
 
 COLOR_RGB = {
@@ -68,8 +76,10 @@ COLOR_RGB = {
     "value": "181,140,255",
     "short": "71,215,255",
     "mom": "255,92,92",
+    "lead": "122,167,255",
     "rs": "255,165,0",
     "brk": "0,206,209",
+    "wave": "66,214,140",
 }
 
 GIT_TRACKED_OUTPUTS = [
@@ -317,180 +327,213 @@ def score_candidates(df: pd.DataFrame) -> pd.DataFrame:
         + 0.05 * df["peg_score"]
     )
 
-    df["rsi_accel_pct"] = pct_score(df["rsi_accel"], lower_is_better=False).fillna(50.0)
-    df["rsi_delta_pct"] = pct_score(df["rsi_delta_1"], lower_is_better=False).fillna(50.0)
-    df["grind_bonus"] = np.where(
-        (df["inflection_flag"] == 1) & (df["rsi_delta_1"] >= 5) & (df["rsi_accel"] >= 10),
-        15.0,
-        0.0,
-    )
-    df["rsi_acceleration_score"] = (0.70 * df["rsi_accel_pct"] + 0.20 * df["rsi_delta_pct"] + df["grind_bonus"]).clip(0, 100)
-    df["rsi_value_score"] = 0.65 * df["rsi_acceleration_score"] + 0.35 * df["composite_value_score"]
+    # ── Continuous technical factor scores ──
+    # Design rule: a defined factor always gets a 0-100 value for every stock.
+    # Eligibility flags only decide tab membership; they no longer zero-out scores.
+    for c in [
+        "rsi0", "rsi1", "rsi2", "rsi3", "rsi4", "rsi5", "rsi_delta_1", "prior_delta_3_avg", "rsi_accel",
+        "ret_6m_pct", "ret_3m_pct", "ret_1m_pct", "ret_1w_pct", "price_vs_sma20_pct", "price_vs_sma50_pct",
+        "price_vs_sma200_pct", "volume_vs_20d", "from_52w_low_pct", "from_52w_high_pct",
+    ]:
+        df[c] = pd.to_numeric(df.get(c, np.nan), errors="coerce")
 
     df["sector_ret_1m_median"] = df.groupby("sector")["ret_1m_pct"].transform("median")
     df["sector_ret_3m_median"] = df.groupby("sector")["ret_3m_pct"].transform("median")
     df["peer_lag_1m_pct"] = df["sector_ret_1m_median"] - df["ret_1m_pct"]
     df["peer_lag_3m_pct"] = df["sector_ret_3m_median"] - df["ret_3m_pct"]
-    df["peer_lag_score"] = (0.65 * pct_score(df["peer_lag_1m_pct"], lower_is_better=False).fillna(50.0) + 0.35 * pct_score(df["peer_lag_3m_pct"], lower_is_better=False).fillna(50.0)).clip(0, 100)
+
+    # Percentile anchors used by several sleeves.
+    df["rsi_accel_pct"] = pct_score(df["rsi_accel"], lower_is_better=False).fillna(50.0)
+    df["rsi_delta_pct"] = pct_score(df["rsi_delta_1"], lower_is_better=False).fillna(50.0)
+    df["ret_1w_rank"] = pct_score(df["ret_1w_pct"], lower_is_better=False).fillna(50.0)
+    df["ret_1m_rank"] = pct_score(df["ret_1m_pct"], lower_is_better=False).fillna(50.0)
+    df["ret_3m_rank"] = pct_score(df["ret_3m_pct"], lower_is_better=False).fillna(50.0)
+    df["ret_6m_rank"] = pct_score(df["ret_6m_pct"], lower_is_better=False).fillna(50.0)
+    df["volume_rank"] = pct_score(df["volume_vs_20d"].clip(upper=3.0), lower_is_better=False).fillna(50.0)
+    df["sector_strength_score"] = pct_score(df["sector_ret_1m_median"], lower_is_better=False).fillna(50.0)
+    df["sector_strength_3m_score"] = pct_score(df["sector_ret_3m_median"], lower_is_better=False).fillna(50.0)
+    df["peer_lag_score"] = (
+        0.65 * pct_score(df["peer_lag_1m_pct"], lower_is_better=False).fillna(50.0)
+        + 0.35 * pct_score(df["peer_lag_3m_pct"], lower_is_better=False).fillna(50.0)
+    ).clip(0, 100)
     df["peer_rally_laggard_flag"] = ((df["sector_ret_1m_median"] > 3.0) & (df["peer_lag_1m_pct"] > 5.0)).astype(int)
 
+    # Price-distribution / market-profile location: 0 = 52w low, 100 = 52w high.
+    low_dist = df["from_52w_low_pct"].clip(lower=0)
+    high_gap = (-df["from_52w_high_pct"]).clip(lower=0)
+    df["price_position_52w"] = (100.0 * low_dist / (low_dist + high_gap).replace(0, np.nan)).clip(0, 100).fillna(50.0)
+    df["accumulation_location_score"] = (100.0 - (df["price_position_52w"] - 22.0).abs() * 3.0).clip(0, 100)
+    df["markup_location_score"] = (100.0 - (df["price_position_52w"] - 62.0).abs() * 2.0).clip(0, 100)
+    df["breakout_location_score"] = (100.0 - (df["price_position_52w"] - 78.0).abs() * 2.2).clip(0, 100)
+    df["distribution_risk_score"] = np.where(
+        (df["price_position_52w"] > 82) & (df["rsi0"] > 65) & (df["ret_1w_pct"] > 3),
+        100.0,
+        0.0,
+    )
+
+    # Trend/support geometry.
+    df["sma_proximity_score"] = (
+        0.55 * pct_score(df["price_vs_sma50_pct"].abs(), lower_is_better=True).fillna(50.0)
+        + 0.30 * pct_score(df["price_vs_sma200_pct"].abs(), lower_is_better=True).fillna(50.0)
+        + 0.15 * pct_score(df["price_vs_sma20_pct"].abs(), lower_is_better=True).fillna(50.0)
+    ).clip(0, 100)
+    df["trend_alignment_score"] = (
+        0.40 * pct_score(df["price_vs_sma50_pct"], lower_is_better=False).fillna(50.0)
+        + 0.35 * pct_score(df["price_vs_sma200_pct"], lower_is_better=False).fillna(50.0)
+        + 0.25 * pct_score(df["price_vs_sma20_pct"], lower_is_better=False).fillna(50.0)
+    ).clip(0, 100)
+
+    # RSI inflection + value: accumulation/base entries get credit even when the turn is early.
+    df["rsi_zone_inflection_score"] = (100.0 - (df["rsi0"] - 43.0).abs() * 3.3).clip(0, 100).fillna(50.0)
+    df["grind_bonus"] = np.where(
+        (df["rsi_delta_1"] > 0) & (df["prior_delta_3_avg"] < 0) & (df["rsi_accel"] > 0),
+        12.0,
+        0.0,
+    )
+    df["rsi_acceleration_score"] = (
+        0.38 * df["rsi_accel_pct"]
+        + 0.26 * df["rsi_delta_pct"]
+        + 0.18 * df["rsi_zone_inflection_score"]
+        + 0.10 * df["accumulation_location_score"]
+        + 0.08 * df["volume_rank"]
+        + df["grind_bonus"]
+    ).clip(0, 100)
+    df["rsi_value_score"] = (0.58 * df["rsi_acceleration_score"] + 0.42 * df["composite_value_score"]).clip(0, 100)
+
+    # Squeeze/value sleeves: continuous; no blank/zero undefined cells.
     df["short_score"] = pct_score(df["short_pct_float"], lower_is_better=False).fillna(35.0)
     df["near_low_score"] = pct_score(df["from_52w_low_pct"], lower_is_better=True).fillna(50.0)
-    df["oversold_not_broken_score"] = np.where(df["rsi0"].between(25, 55), 70.0, 40.0)
+    df["oversold_not_broken_score"] = (100.0 - (df["rsi0"] - 42.0).abs() * 2.3).clip(20, 100).fillna(50.0)
     df["squeeze_laggard_score"] = (
         0.35 * df["short_score"]
-        + 0.30 * df["near_low_score"]
-        + 0.25 * df["peer_lag_score"]
+        + 0.25 * df["near_low_score"]
+        + 0.22 * df["peer_lag_score"]
         + 0.10 * df["oversold_not_broken_score"]
-        + np.where((df["peer_rally_laggard_flag"] == 1) & (df["short_pct_float"] >= 5), 10.0, 0.0)
+        + 0.08 * df["volume_rank"]
+        + np.where((df["peer_rally_laggard_flag"] == 1) & (df["short_pct_float"] >= 5), 8.0, 0.0)
     ).clip(0, 100)
-    df["value_laggard_score"] = (0.45 * df["composite_value_score"] + 0.35 * df["peer_lag_score"] + 0.20 * df["near_low_score"]).clip(0, 100)
-
-    # ── Momentum Pullback Score (relative-ranking based) ──
-    # Screens for stocks with the STRONGEST relative 6-month returns that
-    # have pulled back 1-2 weeks. Uses percentile ranking instead of
-    # absolute thresholds — works in both bull and bear markets. Volume
-    # is the primary gate: only stocks with meaningful institutional
-    # interest (top 60% by dollar volume and above-average relative volume)
-    # are considered.
-    for c in ["ret_6m_pct", "ret_1w_pct", "price_vs_sma50_pct", "price_vs_sma200_pct", "volume_vs_20d"]:
-        df[c] = pd.to_numeric(df.get(c, np.nan), errors="coerce")
-    df["dollar_vol"] = pd.to_numeric(df.get("dollar_volume_20d_polygon", 0), errors="coerce").fillna(0)
-
-    # Volume gate: top 60% by dollar volume (where available) OR volume > 0.8x avg
-    # Fallback to volume_vs_20d if dollar_vol is all NaN
-    dv_valid = df["dollar_vol"].gt(0).sum()
-    if dv_valid > 10:
-        dollar_median = df.loc[df["dollar_vol"] > 0, "dollar_vol"].median()
-        df["has_institutional_flow"] = (df["dollar_vol"] > dollar_median) & (df["volume_vs_20d"] > 0.8)
-    else:
-        # Fallback: above-average relative volume = institutional interest
-        df["has_institutional_flow"] = df["volume_vs_20d"] > 0.8
-    # Relative momentum: percentile rank of 6-month return (higher = relatively stronger)
-    df["ret_6m_rank"] = pct_score(df["ret_6m_pct"], lower_is_better=False).fillna(50.0)
-    # Recent pullback: ret_1w < 0 and rank how deep (deeper = better entry)
-    df["pullback_depth"] = (-df["ret_1w_pct"]).clip(lower=0)
-    df["pullback_score"] = pct_score(
-        df["pullback_depth"].where(df["ret_1w_pct"].lt(0)), lower_is_better=False,
-    ).fillna(0.0)
-    # Consolidation: proximity to SMA50 + SMA200
-    df["sma_proximity_score"] = (
-        0.6 * pct_score(df["price_vs_sma50_pct"].abs(), lower_is_better=True).fillna(50.0)
-        + 0.4 * pct_score(df["price_vs_sma200_pct"].abs(), lower_is_better=True).fillna(50.0)
+    df["value_laggard_score"] = (
+        0.42 * df["composite_value_score"]
+        + 0.28 * df["peer_lag_score"]
+        + 0.18 * df["near_low_score"]
+        + 0.12 * df["rsi_acceleration_score"]
     ).clip(0, 100)
-    # RSI cool zone: 30-65, peaks at 45
-    df["rsi_cool_score"] = np.where(
-        df["rsi0"].between(30, 65),
-        (100.0 - abs(df["rsi0"] - 45.0) * 4.0).clip(0, 100),
-        0.0,
+
+    # Momentum leader / wave-3 sleeve: leaders can be extended, but exhaustion is penalized.
+    df["rsi_leader_zone_score"] = (100.0 - (df["rsi0"] - 58.0).abs() * 3.0).clip(0, 100).fillna(50.0)
+    df["momentum_leader_score"] = (
+        0.27 * df["ret_6m_rank"]
+        + 0.24 * df["ret_3m_rank"]
+        + 0.18 * df["trend_alignment_score"]
+        + 0.13 * df["markup_location_score"]
+        + 0.10 * df["volume_rank"]
+        + 0.08 * df["rsi_leader_zone_score"]
+        - 0.12 * df["distribution_risk_score"]
+    ).clip(0, 100)
+    df["momentum_leader_eligible"] = (
+        (df["momentum_leader_score"] >= 62)
+        & (df["ret_3m_rank"] >= 55)
+        & (df["trend_alignment_score"] >= 50)
+        & (df["volume_vs_20d"].fillna(0) >= 0.55)
     )
-    # Volume intensity: above-average volume = more conviction
-    df["vol_intensity"] = pct_score(df["volume_vs_20d"].clip(upper=3.0), lower_is_better=False).fillna(50.0)
 
-    # Gate: institutional flow + pullback (no absolute momentum threshold)
+    # Momentum pullback / wave-2 or wave-4: strong leader, short pullback, RSI reset, support proximity.
+    df["pullback_depth"] = (-df["ret_1w_pct"]).clip(lower=0, upper=18)
+    df["pullback_score"] = pct_score(df["pullback_depth"], lower_is_better=False).fillna(50.0)
+    df["pullback_presence_score"] = np.where(df["ret_1w_pct"].lt(0), 100.0, (50.0 - df["ret_1w_pct"].clip(lower=0, upper=10) * 5.0)).clip(0, 100)
+    df["rsi_cool_score"] = (100.0 - (df["rsi0"] - 46.0).abs() * 3.2).clip(0, 100).fillna(50.0)
+    df["momentum_pullback_score"] = (
+        0.28 * df["momentum_leader_score"]
+        + 0.20 * df["pullback_score"]
+        + 0.17 * df["pullback_presence_score"]
+        + 0.16 * df["sma_proximity_score"]
+        + 0.11 * df["rsi_cool_score"]
+        + 0.08 * df["volume_rank"]
+    ).clip(0, 100)
     df["mom_pullback_eligible"] = (
-        df["has_institutional_flow"]
+        (df["momentum_leader_score"] >= 50)
         & df["ret_1w_pct"].lt(0)
-        & df["rsi0"].between(30, 65)
-    )
-    df["momentum_pullback_score"] = np.where(
-        df["mom_pullback_eligible"],
-        (
-            0.25 * df["ret_6m_rank"]
-            + 0.25 * df["pullback_score"]
-            + 0.20 * df["sma_proximity_score"]
-            + 0.15 * df["rsi_cool_score"]
-            + 0.15 * df["vol_intensity"]
-        ).clip(0, 100),
-        0.0,
+        & df["rsi0"].between(28, 68)
+        & (df["volume_vs_20d"].fillna(0) >= 0.45)
     )
 
-    # ── Relative Strength Pullback Score ──
-    # Winning-sector stocks with strong 3-month momentum that just had a sharp
-    # 1-week pullback into support/demand zones.  Finds the strongest stocks in
-    # the strongest sectors pulling back to buyable levels — a continuation
-    # bounce setup, not a reversal.
-    for c in ["sector_ret_1m_median", "sector_ret_3m_median", "price_vs_sma50_pct", "price_vs_sma200_pct"]:
-        df[c] = pd.to_numeric(df.get(c, np.nan), errors="coerce")
-
-    # 1) Sector strength (20%): higher sector_ret_1m_median = winning sector
-    df["sector_strength_score"] = pct_score(df["sector_ret_1m_median"], lower_is_better=False).fillna(50.0)
-
-    # 2) Stock relative strength (25%): higher ret_3m_pct = stronger stock
-    df["rel_strength_score_3m"] = pct_score(df["ret_3m_pct"], lower_is_better=False).fillna(50.0)
-
-    # 3) Pullback magnitude (25%): ABS(ret_1w_pct), deeper = better entry, capped at 15%
-    df["rs_pullback_depth"] = (-df["ret_1w_pct"]).clip(lower=1, upper=15)
-    df["rs_pullback_entry_score"] = pct_score(
-        df["rs_pullback_depth"].where(df["ret_1w_pct"].lt(-1)), lower_is_better=False,
-    ).fillna(0.0)
-
-    # 4) Support proximity (20%): closeness to SMA50 + SMA200 (closer = better)
-    df["rs_support_proximity"] = (
-        0.6 * pct_score(df["price_vs_sma50_pct"].abs(), lower_is_better=True).fillna(50.0)
-        + 0.4 * pct_score(df["price_vs_sma200_pct"].abs(), lower_is_better=True).fillna(50.0)
+    # Relative strength pullback: continuous relative strength plus buyable reset.
+    df["rel_strength_core_score"] = (
+        0.34 * df["ret_3m_rank"]
+        + 0.22 * df["ret_6m_rank"]
+        + 0.18 * df["sector_strength_score"]
+        + 0.14 * df["trend_alignment_score"]
+        + 0.12 * df["volume_rank"]
     ).clip(0, 100)
-
-    # 5) RSI reset (10%): RSI 30-55 = cooled off; peak at 42.5
-    df["rs_rsi_reset_score"] = np.where(
-        df["rsi0"].between(30, 55),
-        np.where(df["rsi0"].between(35, 50),
-                 (100.0 - abs(df["rsi0"] - 42.5) * 6.0).clip(0, 100),
-                 30.0),
-        0.0,
-    )
-
-    # Gate (must pass all 4) — relaxed for broader coverage
+    df["rs_pullback_depth"] = (-df["ret_1w_pct"]).clip(lower=0, upper=15)
+    df["rs_pullback_entry_score"] = pct_score(df["rs_pullback_depth"], lower_is_better=False).fillna(50.0)
+    df["rs_rsi_reset_score"] = (100.0 - (df["rsi0"] - 45.0).abs() * 3.0).clip(0, 100).fillna(50.0)
+    df["rel_strength_pullback_score"] = (
+        0.34 * df["rel_strength_core_score"]
+        + 0.20 * df["rs_pullback_entry_score"]
+        + 0.18 * df["sma_proximity_score"]
+        + 0.14 * df["rs_rsi_reset_score"]
+        + 0.14 * df["sector_strength_score"]
+    ).clip(0, 100)
     df["rs_pullback_eligible"] = (
-        df["sector_ret_1m_median"].gt(-2)
-        & df["ret_3m_pct"].gt(df["sector_ret_3m_median"] * 0.8)
-        & df["ret_1w_pct"].lt(-1)
-        & df["from_52w_low_pct"].lt(40)
+        (df["rel_strength_core_score"] >= 55)
+        & df["ret_1w_pct"].lt(0)
+        & (df["sector_ret_1m_median"].fillna(-99) > -8)
+        & df["rsi0"].between(28, 68)
     )
 
-    df["rel_strength_pullback_score"] = np.where(
-        df["rs_pullback_eligible"],
-        (
-            0.20 * df["sector_strength_score"]
-            + 0.25 * df["rel_strength_score_3m"]
-            + 0.25 * df["rs_pullback_entry_score"]
-            + 0.20 * df["rs_support_proximity"]
-            + 0.10 * df["rs_rsi_reset_score"]
-        ).clip(0, 100),
-        0.0,
-    )
-
-    # Catches stocks where RSI is turning up from the 40-60 mid-range
-    # with expanding volume and sector tailwind — the early stage of
-    # a breakout, not a laggard reversal.
-    # Gate: RSI in 40-60 zone, rising (delta>0), accelerating, decent volume
+    # RSI breakout / impulse: wave-3 or wave-5 expansion with volume and sector tailwind.
+    df["rsi_zone_score"] = (100.0 - (df["rsi0"] - 53.0).abs() * 3.2).clip(0, 100).fillna(50.0)
+    df["st_mom_score"] = pct_score(df["ret_1w_pct"], lower_is_better=False).fillna(50.0)
+    df["inflect_breakout_score"] = (
+        0.25 * df["rsi_zone_score"]
+        + 0.22 * df["rsi_accel_pct"]
+        + 0.18 * df["volume_rank"]
+        + 0.15 * df["sector_strength_score"]
+        + 0.12 * df["st_mom_score"]
+        + 0.08 * df["breakout_location_score"]
+    ).clip(0, 100)
     df["inflect_breakout_eligible"] = (
-        df["rsi0"].between(40, 60)
+        df["rsi0"].between(38, 68)
         & df["rsi_delta_1"].gt(0)
-        & df["rsi_accel"].gt(0)
-        & df["volume_vs_20d"].gt(0.8)
+        & df["rsi_accel"].gt(-2)
+        & (df["volume_vs_20d"].fillna(0) >= 0.55)
     )
-    # RSI zone score: tent function peaking at RSI 48-52
-    df["rsi_zone_score"] = (100.0 - abs(df["rsi0"] - 50.0) * 4.0).clip(0, 100)
-    # RSI acceleration percentile rank
-    df["rsi_accel_breakout_pct"] = pct_score(df["rsi_accel"], lower_is_better=False).fillna(50.0)
-    # Volume expansion percentile rank
-    df["vol_expansion_pct"] = pct_score(df["volume_vs_20d"], lower_is_better=False).fillna(50.0)
-    # Sector tailwind percentile rank
-    df["sector_tailwind_pct"] = pct_score(df["sector_ret_1m_median"], lower_is_better=False).fillna(50.0)
-    # Short-term momentum bonus
-    df["st_mom_bonus"] = np.where(df["ret_1w_pct"] > 0, 50.0, 0.0)
-    df["inflect_breakout_score"] = np.where(
-        df["inflect_breakout_eligible"],
-        (
-            0.30 * df["rsi_zone_score"]
-            + 0.25 * df["rsi_accel_breakout_pct"]
-            + 0.20 * df["vol_expansion_pct"]
-            + 0.15 * df["sector_tailwind_pct"]
-            + 0.10 * df["st_mom_bonus"]
-        ).clip(0, 100),
-        0.0,
-    )
+
+    # Elliott-wave-inspired stage classifier. This is a deterministic feature label, not a forecast.
+    df["wave_accumulation_score"] = (
+        0.45 * df["accumulation_location_score"]
+        + 0.25 * df["rsi_acceleration_score"]
+        + 0.20 * df["near_low_score"]
+        + 0.10 * df["volume_rank"]
+    ).clip(0, 100)
+    df["wave_pullback_score"] = (
+        0.42 * df["momentum_pullback_score"]
+        + 0.28 * df["rel_strength_pullback_score"]
+        + 0.18 * df["sma_proximity_score"]
+        + 0.12 * df["rsi_cool_score"]
+    ).clip(0, 100)
+    df["wave_markup_score"] = (
+        0.55 * df["momentum_leader_score"]
+        + 0.20 * df["markup_location_score"]
+        + 0.15 * df["sector_strength_score"]
+        + 0.10 * df["volume_rank"]
+    ).clip(0, 100)
+    df["wave_breakout_score"] = (
+        0.60 * df["inflect_breakout_score"]
+        + 0.18 * df["breakout_location_score"]
+        + 0.12 * df["ret_1m_rank"]
+        + 0.10 * df["volume_rank"]
+    ).clip(0, 100)
+    wave_cols = ["wave_accumulation_score", "wave_pullback_score", "wave_markup_score", "wave_breakout_score"]
+    df["wave_setup_score"] = df[wave_cols].max(axis=1).fillna(50.0).clip(0, 100)
+    wave_label_map = {
+        "wave_accumulation_score": "Wave 1 / accumulation",
+        "wave_pullback_score": "Wave 2-4 / pullback",
+        "wave_markup_score": "Wave 3 / markup leader",
+        "wave_breakout_score": "Wave 3-5 / breakout",
+    }
+    df["wave_stage"] = df[wave_cols].idxmax(axis=1).map(wave_label_map).fillna("Neutral / transition")
 
     df["opportunity_score"] = df[SCORE_COLUMNS].max(axis=1)
 
@@ -542,6 +585,7 @@ def final_candidate_tickers(df: pd.DataFrame) -> list[str]:
         cap_by_sector(df[df["is_top_inflection"]], "rsi_value_score", 15, 3),
         cap_by_sector(df.sort_values("squeeze_laggard_score", ascending=False), "squeeze_laggard_score", 15, 3),
         cap_by_sector(df.sort_values("value_laggard_score", ascending=False), "value_laggard_score", 15, 3),
+        cap_by_sector(df[df["momentum_leader_eligible"]].sort_values("momentum_leader_score", ascending=False), "momentum_leader_score", 15, 3),
         cap_by_sector(df[df["mom_pullback_eligible"]].sort_values("momentum_pullback_score", ascending=False), "momentum_pullback_score", 15, 3),
         cap_by_sector(df[df["rs_pullback_eligible"]].sort_values("rel_strength_pullback_score", ascending=False), "rel_strength_pullback_score", 25, 3),
         cap_by_sector(df[df["inflect_breakout_eligible"]].sort_values("inflect_breakout_score", ascending=False), "inflect_breakout_score", 15, 3),
@@ -951,8 +995,8 @@ def record(row) -> dict:
         "global_rank", "rank_in_sector", "sector", "ticker", "company", "market_cap", "four_h_close", "display_close", "price_source", "latest_daily_close",
         "latest_polygon_price", "latest_polygon_price_source", "latest_polygon_price_timestamp", "latest_polygon_price_status", "warehouse_display_close",
         "diversified_source",
-        "opportunity_score", "rsi_value_score", "squeeze_laggard_score", "value_laggard_score", "momentum_pullback_score", "rel_strength_pullback_score", "inflect_breakout_score", "ev_score",
-        "rsi_acceleration_score", "composite_value_score", "rsi0", "rsi1", "rsi2", "rsi3", "rsi4", "rsi5", "rsi_delta_1",
+        "opportunity_score", "rsi_value_score", "squeeze_laggard_score", "value_laggard_score", "momentum_leader_score", "momentum_pullback_score", "rel_strength_pullback_score", "inflect_breakout_score", "wave_setup_score", "ev_score",
+        "rsi_acceleration_score", "composite_value_score", "rel_strength_core_score", "price_position_52w", "wave_stage", "wave_accumulation_score", "wave_pullback_score", "wave_markup_score", "wave_breakout_score", "rsi0", "rsi1", "rsi2", "rsi3", "rsi4", "rsi5", "rsi_delta_1",
         "prior_delta_3_avg", "rsi_accel", "inflection_flag", "yf_forward_pe", "yf_trailing_pe",
         "yf_price_to_book", "yf_peg_ratio", "from_52w_high_pct", "from_52w_low_pct", "short_pct_float",
         "ret_1w_pct", "ret_1m_pct", "ret_3m_pct", "ret_6m_pct", "ret_ytd_pct",
@@ -964,7 +1008,7 @@ def record(row) -> dict:
     out = {}
     for key in keys:
         value = row.get(key)
-        if key in {"sector", "ticker", "company", "price_source", "latest_polygon_price_source", "latest_polygon_price_status", "value_grade", "growth_grade", "momentum_grade", "primary_strategy", "diversified_source", "production_factor_basket", "production_theme", "primary_keyword_factor", "keyword_factor_baskets"}:
+        if key in {"sector", "ticker", "company", "price_source", "latest_polygon_price_source", "latest_polygon_price_status", "value_grade", "growth_grade", "momentum_grade", "primary_strategy", "diversified_source", "wave_stage", "production_factor_basket", "production_theme", "primary_keyword_factor", "keyword_factor_baskets"}:
             out[key] = None if pd.isna(value) else str(value)
         elif key in {"four_h_timestamp", "latest_daily_timestamp"}:
             out[key] = str(value)
@@ -996,7 +1040,7 @@ def fmt_bn(value):
 def render_bar(value, cls=""):
     """Full-width gradient bar filling the cell."""
     v = 0 if value is None or (isinstance(value, float) and math.isnan(value)) else max(0, min(100, float(value)))
-    color_map = {"hot": "var(--green)", "value": "var(--purple)", "short": "var(--cyan)", "mom": "var(--red)", "rs": "#ffa500", "brk": "#00ced1"}
+    color_map = {"hot": "var(--green)", "value": "var(--purple)", "short": "var(--cyan)", "lead": "var(--blue)", "mom": "var(--red)", "rs": "#ffa500", "brk": "#00ced1", "wave": "var(--green)"}
     color = color_map.get(cls, "var(--amber)")
     return f'<div class="score-bar" style="--bar-pct:{v:.0f}%;--bar-color:{color}"><span class="bar-fill"></span><span class="bar-score">{v:.0f}</span></div>'
 
@@ -1241,6 +1285,7 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
     inflect = cap_by_sector(df[df["is_top_inflection"]], "rsi_value_score", 15, 3)
     squeeze = cap_by_sector(df.sort_values("squeeze_laggard_score", ascending=False), "squeeze_laggard_score", 15, 3)
     laggards = cap_by_sector(df.sort_values("value_laggard_score", ascending=False), "value_laggard_score", 15, 3)
+    leaders = cap_by_sector(df[df["momentum_leader_eligible"]].sort_values("momentum_leader_score", ascending=False), "momentum_leader_score", 15, 3)
     pullbacks = cap_by_sector(df[df["mom_pullback_eligible"]].sort_values("momentum_pullback_score", ascending=False), "momentum_pullback_score", 15, 3)
     rs_pullbacks = cap_by_sector(df[df["rs_pullback_eligible"]].sort_values("rel_strength_pullback_score", ascending=False), "rel_strength_pullback_score", 25, 3)
     inflect_breakouts = cap_by_sector(df[df["inflect_breakout_eligible"]].sort_values("inflect_breakout_score", ascending=False), "inflect_breakout_score", 15, 3)
@@ -1260,6 +1305,7 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
         "inflections": [record(r) for _, r in inflect.iterrows()],
         "squeeze_laggards": [record(r) for _, r in squeeze.iterrows()],
         "value_laggards": [record(r) for _, r in laggards.iterrows()],
+        "momentum_leaders": [record(r) for _, r in leaders.iterrows()],
         "momentum_pullbacks": [record(r) for _, r in pullbacks.iterrows()],
         "rel_strength_pullbacks": [record(r) for _, r in rs_pullbacks.iterrows()],
         "inflect_breakouts": [record(r) for _, r in inflect_breakouts.iterrows()],
@@ -1283,9 +1329,12 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
             f"{render_rsi_cell(r)}"
             f"{render_score_cell(r.get('squeeze_laggard_score'), 'short')}"
             f"{render_score_cell(r.get('value_laggard_score'), 'value')}"
+            f"{render_score_cell(r.get('momentum_leader_score'), 'lead')}"
             f"{render_score_cell(r.get('momentum_pullback_score'), 'mom')}"
             f"{render_score_cell(r.get('rel_strength_pullback_score'), 'rs')}"
             f"{render_score_cell(r.get('inflect_breakout_score'), 'brk')}"
+            f"{render_score_cell(r.get('wave_setup_score'), 'wave')}"
+            f"<td>{html.escape(str(r.get('wave_stage', '')))}</td>"
             f"<td>{render_sparkline(r)}</td>"
             f"<td>{fmt_num(r.get('short_pct_float'))}%</td>"
             f"<td>{fmt_num(r.get('from_52w_low_pct'))}%</td>"
@@ -1352,7 +1401,8 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
             f"<span>RSI {rsi_str}</span> &middot; "
             f"<span>Shrt {fmt_num(r.get('short_pct_float'))}%</span> &middot; "
             f"<span>Lo {fmt_num(r.get('from_52w_low_pct'))}%</span> &middot; "
-            f"<span>Lag {fmt_num(r.get('peer_lag_1m_pct'))}%</span>"
+            f"<span>Lag {fmt_num(r.get('peer_lag_1m_pct'))}%</span> &middot; "
+            f"<span>{html.escape(str(r.get('wave_stage', '')))}</span>"
             f"</div>"
             "</div>"
         )
@@ -1371,6 +1421,8 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
     squeeze_cards = [card_html(r) for _, r in squeeze.iterrows()]
     laggard_rows = [row_html(r) for _, r in laggards.iterrows()]
     laggard_cards = [card_html(r) for _, r in laggards.iterrows()]
+    leader_rows = [row_html(r) for _, r in leaders.iterrows()]
+    leader_cards = [card_html(r) for _, r in leaders.iterrows()]
     pullback_rows = [row_html(r) for _, r in pullbacks.iterrows()]
     pullback_cards = [card_html(r) for _, r in pullbacks.iterrows()]
     inflect_breakout_rows = [row_html(r) for _, r in inflect_breakouts.iterrows()]
@@ -1410,9 +1462,9 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
             )
         sector_sections.append(f"<section class='sector'><h3>{html.escape(str(sector))}</h3><ol>{''.join(items)}</ol></section>")
 
-    header = "<table><thead><tr><th>#</th><th>Ticker</th><th>Sector / Sleeve</th><th>4h Px</th><th>MCap</th><th>Opp</th><th>RSI</th><th>Short/Lows</th><th>Value/Lag</th><th>Momo Pb</th><th>Rel Str Pb</th><th>RSI Brk</th><th>RSI 6-Period</th><th>Short%</th><th>From Low</th><th>Peer Lag 1M</th></tr></thead><tbody>"
+    header = "<table><thead><tr><th>#</th><th>Ticker</th><th>Sector / Sleeve</th><th>4h Px</th><th>MCap</th><th>Opp</th><th>RSI</th><th>Short/Lows</th><th>Value/Lag</th><th>Leader</th><th>Momo Pb</th><th>Rel Str</th><th>RSI Brk</th><th>Wave</th><th>Stage</th><th>RSI 6-Period</th><th>Short%</th><th>From Low</th><th>Peer Lag 1M</th></tr></thead><tbody>"
 
-    master_header = "<table><thead><tr><th>#</th><th>Ticker</th><th>Sector / Sleeve</th><th>4h Px</th><th>MCap</th><th>Opp</th><th>RSI</th><th>All 6 Sleeves Compared</th><th>RSI 6-Period</th><th>Short%</th><th>Peer Lag 1M</th></tr></thead><tbody>"
+    master_header = "<table><thead><tr><th>#</th><th>Ticker</th><th>Sector / Sleeve</th><th>4h Px</th><th>MCap</th><th>Opp</th><th>RSI</th><th>All Sleeve Scores Compared</th><th>RSI 6-Period</th><th>Short%</th><th>Peer Lag 1M</th></tr></thead><tbody>"
 
     factor_baskets, factor_opps = factor_basket_analysis(df)
     factor_rows = []
@@ -1454,7 +1506,7 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
 
     latest_price_ok = sum(
         1
-        for rows in [diversified_top, top, inflect, squeeze, laggards, pullbacks, rs_pullbacks, inflect_breakouts, master_ev]
+        for rows in [diversified_top, top, inflect, squeeze, laggards, leaders, pullbacks, rs_pullbacks, inflect_breakouts, master_ev]
         for _, r in rows.iterrows()
         if str(r.get("latest_polygon_price_status", "")) == "OK"
     )
@@ -1465,7 +1517,7 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
         ("Live Px", f"{latest_price_ok:,}", "Polygon final-row overlays"),
         ("Avg Opp", fmt_num(avg_opp), "full filtered universe"),
         ("Avg RSI", fmt_num(avg_rsi), "latest 4h oscillator"),
-        ("LLM Cards", f"{len(analyses):,}", "web-sourced top ten"),
+        ("Research", f"{len(analyses):,}", "web-sourced top names"),
     ]
     kpi_html = "".join(
         f"<article class='kpi-card'><span>{html.escape(label)}</span><strong>{html.escape(value)}</strong><em>{html.escape(detail)}</em></article>"
@@ -1486,20 +1538,21 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
         return f"<span>{html.escape(label)}</span><b>{int(count)}</b>"
 
     css = """
-:root{--bg:#050607;--bg2:#090d10;--panel:#0d1317;--panel2:#111a20;--panel3:#17242c;--text:#f4efe1;--muted:#a9a294;--faint:#6f756f;--line:rgba(244,239,225,.12);--amber:#f0b83e;--green:#42d68c;--red:#ff6b6b;--purple:#c69cff;--cyan:#55d8ff;--blue:#7aa7ff;--ink:#050607;--shadow:0 20px 80px rgba(0,0,0,.42)}*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;min-height:100dvh;background:radial-gradient(circle at 12% -10%,rgba(85,216,255,.18),transparent 30%),radial-gradient(circle at 90% 0,rgba(240,184,62,.15),transparent 28%),linear-gradient(135deg,var(--bg),var(--bg2));color:var(--text);font-family:ui-monospace,'SFMono-Regular','JetBrains Mono',Menlo,Consolas,monospace;font-size:13px;line-height:1.45;-webkit-font-smoothing:antialiased}a{color:inherit}body:before{content:"";position:fixed;inset:0;pointer-events:none;background-image:linear-gradient(rgba(255,255,255,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.018) 1px,transparent 1px);background-size:42px 42px;mask-image:linear-gradient(to bottom,rgba(0,0,0,.9),transparent 85%)}.site-hero{position:sticky;top:0;z-index:20;border-bottom:1px solid var(--line);background:rgba(5,6,7,.90);backdrop-filter:blur(18px);box-shadow:0 10px 40px rgba(0,0,0,.22)}.hero-inner{max-width:1760px;margin:0 auto;padding:18px 24px;display:grid;grid-template-columns:1.2fr auto;gap:16px;align-items:center}.brand-lockup{display:flex;gap:14px;align-items:center}.brand-mark{width:48px;height:48px;border:1px solid rgba(240,184,62,.5);border-radius:15px;display:grid;place-items:center;background:linear-gradient(145deg,rgba(240,184,62,.22),rgba(85,216,255,.08));box-shadow:inset 0 0 24px rgba(240,184,62,.12)}.brand-copy h1{margin:0;font-size:22px;letter-spacing:.09em;text-transform:uppercase;color:var(--amber)}.brand-copy p{margin:4px 0 0;color:var(--muted)}.hero-actions{display:flex;gap:10px;align-items:center;justify-content:flex-end;flex-wrap:wrap}.status-pill,.hero-actions a{min-height:36px;display:inline-flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:999px;padding:8px 12px;background:rgba(255,255,255,.035);color:var(--muted);text-decoration:none}.status-pill.live{color:var(--green);border-color:rgba(66,214,140,.35)}.hero-actions a.active{color:var(--ink);background:var(--amber);border-color:var(--amber);font-weight:800}.dashboard-app{max-width:1760px;margin:0 auto;padding:18px 24px 36px}.tab-switch{position:absolute;left:-9999px}.workspace{display:grid;grid-template-columns:250px minmax(0,1fr);gap:18px}.rail{position:sticky;top:94px;align-self:start;border:1px solid var(--line);border-radius:24px;background:linear-gradient(180deg,rgba(17,26,32,.95),rgba(8,12,15,.92));box-shadow:var(--shadow);padding:14px}.rail-title{display:flex;justify-content:space-between;align-items:center;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.12em;margin:2px 4px 12px}.rail-title b{color:var(--amber)}.rail label,.rail a{width:100%;min-height:44px;display:flex;justify-content:space-between;align-items:center;padding:10px 12px;margin:4px 0;border-radius:14px;border:1px solid transparent;color:var(--muted);text-decoration:none;cursor:pointer;touch-action:manipulation}.rail label:hover,.rail a:hover{background:rgba(255,255,255,.045);color:var(--text);border-color:var(--line)}.rail label b{color:var(--faint);font-weight:600}.rail a.factor-link{margin-top:10px;border-color:rgba(85,216,255,.22);color:var(--cyan)}#tab-opps:checked~.workspace .opps-tab,#tab-rsi:checked~.workspace .rsi-tab,#tab-sqz:checked~.workspace .sqz-tab,#tab-val:checked~.workspace .val-tab,#tab-mom:checked~.workspace .mom-tab,#tab-brk:checked~.workspace .brk-tab,#tab-rspb:checked~.workspace .rspb-tab,#tab-master:checked~.workspace .master-tab,#tab-sector:checked~.workspace .sector-tab{background:linear-gradient(135deg,var(--amber),#ffd978);color:var(--ink);border-color:var(--amber);box-shadow:0 10px 34px rgba(240,184,62,.22)}.main-stage{min-width:0}.kpi-strip{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin-bottom:14px}.kpi-card{border:1px solid var(--line);border-radius:20px;background:linear-gradient(160deg,rgba(23,36,44,.92),rgba(8,12,15,.9));padding:14px 16px;min-height:110px;position:relative;overflow:hidden}.kpi-card:after{content:"";position:absolute;right:-28px;top:-34px;width:95px;height:95px;border-radius:50%;background:rgba(240,184,62,.08)}.kpi-card span{display:block;color:var(--muted);text-transform:uppercase;letter-spacing:.12em;font-size:10px}.kpi-card strong{display:block;margin:8px 0 2px;font-size:27px;color:var(--text);letter-spacing:-.04em}.kpi-card em{font-style:normal;color:var(--faint);font-size:11px}.method-panel{border:1px solid var(--line);border-radius:24px;background:linear-gradient(135deg,rgba(240,184,62,.10),rgba(85,216,255,.07),rgba(255,255,255,.02));padding:18px;margin-bottom:14px;display:grid;grid-template-columns:1.2fr .8fr;gap:16px}.method-panel h2{margin:0 0 8px;color:var(--amber);font-size:16px;text-transform:uppercase;letter-spacing:.08em}.method-panel p{margin:0;color:var(--muted)}.method-facts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.method-facts span{border:1px solid var(--line);border-radius:14px;padding:10px;color:var(--muted);background:rgba(0,0,0,.16)}.method-facts b{display:block;color:var(--text);font-size:15px}.tab-nav{position:sticky;top:86px;z-index:15;display:flex;gap:8px;overflow-x:auto;padding:10px;margin:0 0 16px;border:1px solid var(--line);border-radius:22px;background:rgba(5,6,7,.82);backdrop-filter:blur(16px);-webkit-overflow-scrolling:touch}.tab-nav label{min-height:44px;white-space:nowrap;display:inline-flex;align-items:center;gap:9px;padding:10px 13px;border-radius:15px;border:1px solid var(--line);background:rgba(255,255,255,.035);color:var(--muted);cursor:pointer;touch-action:manipulation}.tab-nav label:hover{color:var(--text);background:rgba(255,255,255,.07)}.tab-nav label b{font-size:11px;color:var(--faint)}.tab-content{display:none;animation:rise .24s ease-out}#tab-opps:checked~.workspace #c-opps,#tab-rsi:checked~.workspace #c-rsi,#tab-sqz:checked~.workspace #c-sqz,#tab-val:checked~.workspace #c-val,#tab-mom:checked~.workspace #c-mom,#tab-brk:checked~.workspace #c-brk,#tab-rspb:checked~.workspace #c-rspb,#tab-master:checked~.workspace #c-master,#tab-sector:checked~.workspace #c-sector{display:block}@keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}.stage-intro{border:1px solid var(--line);border-radius:24px;background:linear-gradient(145deg,rgba(17,26,32,.96),rgba(8,12,15,.94));padding:18px;margin:0 0 14px;display:grid;grid-template-columns:1fr auto;gap:10px;align-items:end}.stage-intro .kicker{grid-column:1/-1;color:var(--cyan);text-transform:uppercase;letter-spacing:.16em;font-size:10px}.stage-intro h2{margin:0;color:var(--text);font-size:22px;letter-spacing:-.03em}.stage-intro p{margin:0;color:var(--muted);max-width:900px}.stage-intro b{border:1px solid rgba(240,184,62,.35);border-radius:999px;padding:8px 12px;color:var(--amber);white-space:nowrap}.signal-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;margin:0 0 18px}.mobile-card{border:1px solid var(--line);border-radius:22px;background:linear-gradient(160deg,rgba(17,26,32,.95),rgba(8,12,15,.92));box-shadow:0 16px 50px rgba(0,0,0,.25);padding:14px;position:relative;overflow:hidden}.mobile-card:before{content:"";position:absolute;inset:0 0 auto;height:3px;background:linear-gradient(90deg,var(--amber),var(--cyan),var(--green))}.mc-head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:8px}.mc-rank{color:var(--amber);font-weight:900}.mc-ticker a,.mc-ticker{font-size:18px;font-weight:900;color:var(--text);text-decoration:none}.mc-company{color:var(--muted);font-size:11px}.mc-meta{color:var(--muted);font-size:11px;margin-bottom:10px}.mc-scores{display:grid;gap:6px}.mc-score-row{display:grid;grid-template-columns:46px minmax(0,1fr) 32px;align-items:center;gap:8px}.mc-label{color:var(--muted);font-size:10px;text-align:right}.bar{height:12px;background:rgba(255,255,255,.07);border-radius:99px;overflow:hidden}.bar i{display:block;height:100%;width:0;border-radius:inherit;background:linear-gradient(90deg,var(--amber),var(--green))}.bar.short i{background:linear-gradient(90deg,var(--cyan),var(--blue))}.bar.value i{background:linear-gradient(90deg,var(--purple),var(--amber))}.bar.mom i{background:linear-gradient(90deg,var(--red),var(--amber))}.bar.rs i{background:linear-gradient(90deg,#ffa500,var(--green))}.bar.brk i{background:linear-gradient(90deg,var(--cyan),var(--green))}.mobile-card .bar+b{color:var(--text);font-size:11px;text-align:right}.mc-details{border-top:1px solid var(--line);margin-top:10px;padding-top:8px;color:var(--faint);font-size:11px}.data-panel{border:1px solid var(--line);border-radius:24px;background:rgba(8,12,15,.9);overflow:hidden;margin-bottom:18px;box-shadow:var(--shadow)}.panel-title{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:14px 16px;border-bottom:1px solid var(--line);background:rgba(255,255,255,.03)}.panel-title h3{margin:0;color:var(--amber);font-size:14px;text-transform:uppercase;letter-spacing:.08em}.panel-title span{color:var(--muted);font-size:11px}.table-wrap{overflow:auto;-webkit-overflow-scrolling:touch}table{width:100%;border-collapse:separate;border-spacing:0;background:transparent}th,td{border-bottom:1px solid var(--line);padding:10px 9px;text-align:left;vertical-align:top}th{position:sticky;top:0;z-index:2;background:#0c1115;color:var(--amber);font-size:11px;text-transform:uppercase;letter-spacing:.08em}td{color:var(--text)}td small{display:block;color:var(--muted);font-size:11px;margin-top:3px}tr:hover td{background:rgba(255,255,255,.025)}.score-td{min-width:74px}.score-bar{height:18px;min-width:58px;background:rgba(255,255,255,.07);border-radius:99px;position:relative;overflow:hidden}.score-bar .bar-fill{position:absolute;inset:0 auto 0 0;width:var(--bar-pct);background:linear-gradient(90deg,var(--bar-color),rgba(255,255,255,.18));border-radius:inherit}.score-bar .bar-score{position:absolute;inset:0;display:grid;place-items:center;font-weight:900;color:var(--text);font-size:11px;text-shadow:0 1px 2px #000}.rsi-td .rsi-val{display:block;font-weight:900;color:var(--text)}.sparkline{display:flex;gap:2px;align-items:center}.spark-dot{font-size:11px}.spark-arrow{font-size:8px;color:var(--faint)}.spark-label{font-size:9px;color:var(--muted);margin-left:4px}.rank-badge{margin-right:4px}.master-comparison{min-width:240px}.master-comp-row{display:grid;grid-template-columns:58px 1fr;gap:6px;align-items:center;margin:3px 0}.comp-label{color:var(--muted);font-size:10px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}.card,.sector{border:1px solid var(--line);border-radius:22px;background:linear-gradient(160deg,rgba(17,26,32,.95),rgba(8,12,15,.92));padding:14px}.card-head{display:flex;justify-content:space-between;border-bottom:1px solid var(--line);padding-bottom:9px;margin-bottom:9px}.card-head span{color:var(--amber);font-size:16px;font-weight:900}.card-head em{font-style:normal;color:var(--muted)}.metrics{color:var(--green);margin-bottom:8px}.sources{border:1px solid var(--line);border-radius:14px;background:rgba(0,0,0,.20);padding:9px;margin:9px 0;color:var(--muted)}.sources b{color:var(--cyan)}.sources ol{margin:6px 0 0 18px;padding:0}.sources a{color:var(--amber);text-decoration:none}.sources.missing{border-color:rgba(255,107,107,.25)}.card p{line-height:1.58;margin:0;color:#ddd5c4}.sector h3{margin-top:0}.sector ol{margin:0;padding-left:20px}.sector li{margin:9px 0;color:var(--muted)}.pill{display:inline-flex;align-items:center;min-height:26px;border:1px solid rgba(240,184,62,.4);border-radius:999px;padding:4px 9px;color:var(--amber);background:rgba(240,184,62,.08);font-weight:800}.note{border:1px solid var(--line);border-radius:18px;padding:14px;background:rgba(255,255,255,.035);color:var(--muted);line-height:1.55;margin:0 0 14px}.footer{margin:24px 0 0;border-top:1px solid var(--line);padding-top:14px;color:var(--muted);font-size:12px}.page-shell{max-width:1760px;margin:0 auto;padding:18px 24px 36px}.page-panel{border:1px solid var(--line);border-radius:24px;background:rgba(8,12,15,.9);padding:16px;margin-bottom:16px}.selected td{background:rgba(240,184,62,.08)!important}.sr-only{position:absolute;left:-10000px;width:1px;height:1px;overflow:hidden}@media(max-width:1100px){.workspace{grid-template-columns:1fr}.rail{position:relative;top:auto;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}.rail-title{grid-column:1/-1}.kpi-strip{grid-template-columns:repeat(2,minmax(0,1fr))}.method-panel{grid-template-columns:1fr}.tab-nav{top:78px}.hero-inner{grid-template-columns:1fr}.hero-actions{justify-content:flex-start}}@media(max-width:768px){.hero-inner{padding:12px 14px}.dashboard-app,.page-shell{padding:12px}.brand-mark{width:40px;height:40px}.brand-copy h1{font-size:16px}.brand-copy p{font-size:11px}.hero-actions{gap:6px}.status-pill,.hero-actions a{font-size:11px;min-height:34px;padding:7px 10px}.rail{display:none}.kpi-strip{grid-template-columns:1fr 1fr;gap:8px}.kpi-card{min-height:92px;padding:12px}.kpi-card strong{font-size:22px}.method-facts{grid-template-columns:1fr}.tab-nav{top:65px;border-radius:16px;margin-left:-4px;margin-right:-4px}.tab-nav label{font-size:11px;padding:8px 10px}.stage-intro{grid-template-columns:1fr;padding:14px}.stage-intro h2{font-size:18px}.signal-grid{grid-template-columns:1fr}.tab-content table,.tab-content thead,.tab-content tbody{display:none!important}.data-panel{padding:0}.panel-title{padding:12px}.grid{grid-template-columns:1fr}.mobile-card{padding:12px}.mc-score-row{grid-template-columns:44px minmax(0,1fr) 30px}.footer{font-size:11px}.table-wrap{display:none}}@supports (-webkit-touch-callout:none){body{min-height:-webkit-fill-available}.tab-nav,.table-wrap{-webkit-overflow-scrolling:touch}}
+:root{--bg:#050607;--bg2:#090d10;--panel:#0d1317;--panel2:#111a20;--panel3:#17242c;--text:#f4efe1;--muted:#a9a294;--faint:#6f756f;--line:rgba(244,239,225,.12);--amber:#f0b83e;--green:#42d68c;--red:#ff6b6b;--purple:#c69cff;--cyan:#55d8ff;--blue:#7aa7ff;--ink:#050607;--shadow:0 20px 80px rgba(0,0,0,.42)}*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;min-height:100dvh;background:radial-gradient(circle at 12% -10%,rgba(85,216,255,.18),transparent 30%),radial-gradient(circle at 90% 0,rgba(240,184,62,.15),transparent 28%),linear-gradient(135deg,var(--bg),var(--bg2));color:var(--text);font-family:ui-monospace,'SFMono-Regular','JetBrains Mono',Menlo,Consolas,monospace;font-size:13px;line-height:1.45;-webkit-font-smoothing:antialiased}a{color:inherit}body:before{content:"";position:fixed;inset:0;pointer-events:none;background-image:linear-gradient(rgba(255,255,255,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.018) 1px,transparent 1px);background-size:42px 42px;mask-image:linear-gradient(to bottom,rgba(0,0,0,.9),transparent 85%)}.site-hero{position:sticky;top:0;z-index:20;border-bottom:1px solid var(--line);background:rgba(5,6,7,.90);backdrop-filter:blur(18px);box-shadow:0 10px 40px rgba(0,0,0,.22)}.hero-inner{max-width:1760px;margin:0 auto;padding:18px 24px;display:grid;grid-template-columns:1.2fr auto;gap:16px;align-items:center}.brand-lockup{display:flex;gap:14px;align-items:center}.brand-mark{width:48px;height:48px;border:1px solid rgba(240,184,62,.5);border-radius:15px;display:grid;place-items:center;background:linear-gradient(145deg,rgba(240,184,62,.22),rgba(85,216,255,.08));box-shadow:inset 0 0 24px rgba(240,184,62,.12)}.brand-copy h1{margin:0;font-size:22px;letter-spacing:.09em;text-transform:uppercase;color:var(--amber)}.brand-copy p{margin:4px 0 0;color:var(--muted)}.hero-actions{display:flex;gap:10px;align-items:center;justify-content:flex-end;flex-wrap:wrap}.status-pill,.hero-actions a{min-height:36px;display:inline-flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:999px;padding:8px 12px;background:rgba(255,255,255,.035);color:var(--muted);text-decoration:none}.status-pill.live{color:var(--green);border-color:rgba(66,214,140,.35)}.hero-actions a.active{color:var(--ink);background:var(--amber);border-color:var(--amber);font-weight:800}.dashboard-app{max-width:1760px;margin:0 auto;padding:18px 24px 36px}.tab-switch{position:absolute;left:-9999px}.workspace{display:grid;grid-template-columns:250px minmax(0,1fr);gap:18px}.rail{position:sticky;top:94px;align-self:start;border:1px solid var(--line);border-radius:24px;background:linear-gradient(180deg,rgba(17,26,32,.95),rgba(8,12,15,.92));box-shadow:var(--shadow);padding:14px}.rail-title{display:flex;justify-content:space-between;align-items:center;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.12em;margin:2px 4px 12px}.rail-title b{color:var(--amber)}.rail label,.rail a{width:100%;min-height:44px;display:flex;justify-content:space-between;align-items:center;padding:10px 12px;margin:4px 0;border-radius:14px;border:1px solid transparent;color:var(--muted);text-decoration:none;cursor:pointer;touch-action:manipulation}.rail label:hover,.rail a:hover{background:rgba(255,255,255,.045);color:var(--text);border-color:var(--line)}.rail label b{color:var(--faint);font-weight:600}.rail a.factor-link{margin-top:10px;border-color:rgba(85,216,255,.22);color:var(--cyan)}#tab-opps:checked~.workspace .opps-tab,#tab-rsi:checked~.workspace .rsi-tab,#tab-sqz:checked~.workspace .sqz-tab,#tab-val:checked~.workspace .val-tab,#tab-lead:checked~.workspace .lead-tab,#tab-mom:checked~.workspace .mom-tab,#tab-brk:checked~.workspace .brk-tab,#tab-rspb:checked~.workspace .rspb-tab,#tab-master:checked~.workspace .master-tab,#tab-sector:checked~.workspace .sector-tab{background:linear-gradient(135deg,var(--amber),#ffd978);color:var(--ink);border-color:var(--amber);box-shadow:0 10px 34px rgba(240,184,62,.22)}.main-stage{min-width:0}.kpi-strip{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin-bottom:14px}.kpi-card{border:1px solid var(--line);border-radius:20px;background:linear-gradient(160deg,rgba(23,36,44,.92),rgba(8,12,15,.9));padding:14px 16px;min-height:110px;position:relative;overflow:hidden}.kpi-card:after{content:"";position:absolute;right:-28px;top:-34px;width:95px;height:95px;border-radius:50%;background:rgba(240,184,62,.08)}.kpi-card span{display:block;color:var(--muted);text-transform:uppercase;letter-spacing:.12em;font-size:10px}.kpi-card strong{display:block;margin:8px 0 2px;font-size:27px;color:var(--text);letter-spacing:-.04em}.kpi-card em{font-style:normal;color:var(--faint);font-size:11px}.method-panel{border:1px solid var(--line);border-radius:24px;background:linear-gradient(135deg,rgba(240,184,62,.10),rgba(85,216,255,.07),rgba(255,255,255,.02));padding:18px;margin-bottom:14px;display:grid;grid-template-columns:1.2fr .8fr;gap:16px}.method-panel h2{margin:0 0 8px;color:var(--amber);font-size:16px;text-transform:uppercase;letter-spacing:.08em}.method-panel p{margin:0;color:var(--muted)}.method-facts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.method-facts span{border:1px solid var(--line);border-radius:14px;padding:10px;color:var(--muted);background:rgba(0,0,0,.16)}.method-facts b{display:block;color:var(--text);font-size:15px}.tab-nav{position:sticky;top:86px;z-index:15;display:flex;gap:8px;overflow-x:auto;padding:10px;margin:0 0 16px;border:1px solid var(--line);border-radius:22px;background:rgba(5,6,7,.82);backdrop-filter:blur(16px);-webkit-overflow-scrolling:touch}.tab-nav label{min-height:44px;white-space:nowrap;display:inline-flex;align-items:center;gap:9px;padding:10px 13px;border-radius:15px;border:1px solid var(--line);background:rgba(255,255,255,.035);color:var(--muted);cursor:pointer;touch-action:manipulation}.tab-nav label:hover{color:var(--text);background:rgba(255,255,255,.07)}.tab-nav label b{font-size:11px;color:var(--faint)}.tab-content{display:none;animation:rise .24s ease-out}#tab-opps:checked~.workspace #c-opps,#tab-rsi:checked~.workspace #c-rsi,#tab-sqz:checked~.workspace #c-sqz,#tab-val:checked~.workspace #c-val,#tab-lead:checked~.workspace #c-lead,#tab-mom:checked~.workspace #c-mom,#tab-brk:checked~.workspace #c-brk,#tab-rspb:checked~.workspace #c-rspb,#tab-master:checked~.workspace #c-master,#tab-sector:checked~.workspace #c-sector{display:block}@keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}.stage-intro{border:1px solid var(--line);border-radius:24px;background:linear-gradient(145deg,rgba(17,26,32,.96),rgba(8,12,15,.94));padding:18px;margin:0 0 14px;display:grid;grid-template-columns:1fr auto;gap:10px;align-items:end}.stage-intro .kicker{grid-column:1/-1;color:var(--cyan);text-transform:uppercase;letter-spacing:.16em;font-size:10px}.stage-intro h2{margin:0;color:var(--text);font-size:22px;letter-spacing:-.03em}.stage-intro p{margin:0;color:var(--muted);max-width:900px}.stage-intro b{border:1px solid rgba(240,184,62,.35);border-radius:999px;padding:8px 12px;color:var(--amber);white-space:nowrap}.signal-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;margin:0 0 18px}.mobile-card{border:1px solid var(--line);border-radius:22px;background:linear-gradient(160deg,rgba(17,26,32,.95),rgba(8,12,15,.92));box-shadow:0 16px 50px rgba(0,0,0,.25);padding:14px;position:relative;overflow:hidden}.mobile-card:before{content:"";position:absolute;inset:0 0 auto;height:3px;background:linear-gradient(90deg,var(--amber),var(--cyan),var(--green))}.mc-head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:8px}.mc-rank{color:var(--amber);font-weight:900}.mc-ticker a,.mc-ticker{font-size:18px;font-weight:900;color:var(--text);text-decoration:none}.mc-company{color:var(--muted);font-size:11px}.mc-meta{color:var(--muted);font-size:11px;margin-bottom:10px}.mc-scores{display:grid;gap:6px}.mc-score-row{display:grid;grid-template-columns:46px minmax(0,1fr) 32px;align-items:center;gap:8px}.mc-label{color:var(--muted);font-size:10px;text-align:right}.bar{height:12px;background:rgba(255,255,255,.07);border-radius:99px;overflow:hidden}.bar i{display:block;height:100%;width:0;border-radius:inherit;background:linear-gradient(90deg,var(--amber),var(--green))}.bar.short i{background:linear-gradient(90deg,var(--cyan),var(--blue))}.bar.value i{background:linear-gradient(90deg,var(--purple),var(--amber))}.bar.lead i{background:linear-gradient(90deg,var(--blue),var(--cyan))}.bar.mom i{background:linear-gradient(90deg,var(--red),var(--amber))}.bar.rs i{background:linear-gradient(90deg,#ffa500,var(--green))}.bar.brk i{background:linear-gradient(90deg,var(--cyan),var(--green))}.mobile-card .bar+b{color:var(--text);font-size:11px;text-align:right}.mc-details{border-top:1px solid var(--line);margin-top:10px;padding-top:8px;color:var(--faint);font-size:11px}.data-panel{border:1px solid var(--line);border-radius:24px;background:rgba(8,12,15,.9);overflow:hidden;margin-bottom:18px;box-shadow:var(--shadow)}.panel-title{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:14px 16px;border-bottom:1px solid var(--line);background:rgba(255,255,255,.03)}.panel-title h3{margin:0;color:var(--amber);font-size:14px;text-transform:uppercase;letter-spacing:.08em}.panel-title span{color:var(--muted);font-size:11px}.table-wrap{overflow:auto;-webkit-overflow-scrolling:touch}table{width:100%;border-collapse:separate;border-spacing:0;background:transparent}th,td{border-bottom:1px solid var(--line);padding:10px 9px;text-align:left;vertical-align:top}th{position:sticky;top:0;z-index:2;background:#0c1115;color:var(--amber);font-size:11px;text-transform:uppercase;letter-spacing:.08em}td{color:var(--text)}td small{display:block;color:var(--muted);font-size:11px;margin-top:3px}tr:hover td{background:rgba(255,255,255,.025)}.score-td{min-width:74px}.score-bar{height:18px;min-width:58px;background:rgba(255,255,255,.07);border-radius:99px;position:relative;overflow:hidden}.score-bar .bar-fill{position:absolute;inset:0 auto 0 0;width:var(--bar-pct);background:linear-gradient(90deg,var(--bar-color),rgba(255,255,255,.18));border-radius:inherit}.score-bar .bar-score{position:absolute;inset:0;display:grid;place-items:center;font-weight:900;color:var(--text);font-size:11px;text-shadow:0 1px 2px #000}.rsi-td .rsi-val{display:block;font-weight:900;color:var(--text)}.sparkline{display:flex;gap:2px;align-items:center}.spark-dot{font-size:11px}.spark-arrow{font-size:8px;color:var(--faint)}.spark-label{font-size:9px;color:var(--muted);margin-left:4px}.rank-badge{margin-right:4px}.master-comparison{min-width:240px}.master-comp-row{display:grid;grid-template-columns:58px 1fr;gap:6px;align-items:center;margin:3px 0}.comp-label{color:var(--muted);font-size:10px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}.card,.sector{border:1px solid var(--line);border-radius:22px;background:linear-gradient(160deg,rgba(17,26,32,.95),rgba(8,12,15,.92));padding:14px}.card-head{display:flex;justify-content:space-between;border-bottom:1px solid var(--line);padding-bottom:9px;margin-bottom:9px}.card-head span{color:var(--amber);font-size:16px;font-weight:900}.card-head em{font-style:normal;color:var(--muted)}.metrics{color:var(--green);margin-bottom:8px}.sources{border:1px solid var(--line);border-radius:14px;background:rgba(0,0,0,.20);padding:9px;margin:9px 0;color:var(--muted)}.sources b{color:var(--cyan)}.sources ol{margin:6px 0 0 18px;padding:0}.sources a{color:var(--amber);text-decoration:none}.sources.missing{border-color:rgba(255,107,107,.25)}.card p{line-height:1.58;margin:0;color:#ddd5c4}.sector h3{margin-top:0}.sector ol{margin:0;padding-left:20px}.sector li{margin:9px 0;color:var(--muted)}.pill{display:inline-flex;align-items:center;min-height:26px;border:1px solid rgba(240,184,62,.4);border-radius:999px;padding:4px 9px;color:var(--amber);background:rgba(240,184,62,.08);font-weight:800}.note{border:1px solid var(--line);border-radius:18px;padding:14px;background:rgba(255,255,255,.035);color:var(--muted);line-height:1.55;margin:0 0 14px}.footer{margin:24px 0 0;border-top:1px solid var(--line);padding-top:14px;color:var(--muted);font-size:12px}.page-shell{max-width:1760px;margin:0 auto;padding:18px 24px 36px}.page-panel{border:1px solid var(--line);border-radius:24px;background:rgba(8,12,15,.9);padding:16px;margin-bottom:16px}.selected td{background:rgba(240,184,62,.08)!important}.sr-only{position:absolute;left:-10000px;width:1px;height:1px;overflow:hidden}@media(max-width:1100px){.workspace{grid-template-columns:1fr}.rail{position:relative;top:auto;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}.rail-title{grid-column:1/-1}.kpi-strip{grid-template-columns:repeat(2,minmax(0,1fr))}.method-panel{grid-template-columns:1fr}.tab-nav{top:78px}.hero-inner{grid-template-columns:1fr}.hero-actions{justify-content:flex-start}}@media(max-width:768px){.hero-inner{padding:12px 14px}.dashboard-app,.page-shell{padding:12px}.brand-mark{width:40px;height:40px}.brand-copy h1{font-size:16px}.brand-copy p{font-size:11px}.hero-actions{gap:6px}.status-pill,.hero-actions a{font-size:11px;min-height:34px;padding:7px 10px}.rail{display:none}.kpi-strip{grid-template-columns:1fr 1fr;gap:8px}.kpi-card{min-height:92px;padding:12px}.kpi-card strong{font-size:22px}.method-facts{grid-template-columns:1fr}.tab-nav{top:65px;border-radius:16px;margin-left:-4px;margin-right:-4px}.tab-nav label{font-size:11px;padding:8px 10px}.stage-intro{grid-template-columns:1fr;padding:14px}.stage-intro h2{font-size:18px}.signal-grid{grid-template-columns:1fr}.tab-content table,.tab-content thead,.tab-content tbody{display:none!important}.data-panel{padding:0}.panel-title{padding:12px}.grid{grid-template-columns:1fr}.mobile-card{padding:12px}.mc-score-row{grid-template-columns:44px minmax(0,1fr) 30px}.footer{font-size:11px}.table-wrap{display:none}}@supports (-webkit-touch-callout:none){body{min-height:-webkit-fill-available}.tab-nav,.table-wrap{-webkit-overflow-scrolling:touch}}
 """
     content = f"""<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Equity Screener</title><style>{css}</style></head>
-<body class="revamp-v3"><header class="site-hero"><div class="hero-inner"><div class="brand-lockup"><div class="brand-mark">◈</div><div class="brand-copy"><h1>Equity Screener</h1><p>Live multi-sleeve opportunity cockpit · generated {html.escape(now_et.strftime('%Y-%m-%d %H:%M %Z'))}</p></div></div><div class="hero-actions"><span class="status-pill live">● Live</span><span class="status-pill">latest 4h {html.escape(latest_ts)}</span><span class="status-pill">price &lt; ${price_filter:.0f}</span><a class="active" href="index.html">Cockpit</a><a href="factor-baskets.html">Themes</a></div></div></header>
-<main class="dashboard-app" id="top"><input class="tab-switch" type="radio" name="tab" id="tab-opps" checked><input class="tab-switch" type="radio" name="tab" id="tab-rsi"><input class="tab-switch" type="radio" name="tab" id="tab-sqz"><input class="tab-switch" type="radio" name="tab" id="tab-val"><input class="tab-switch" type="radio" name="tab" id="tab-mom"><input class="tab-switch" type="radio" name="tab" id="tab-brk"><input class="tab-switch" type="radio" name="tab" id="tab-rspb"><input class="tab-switch" type="radio" name="tab" id="tab-master"><input class="tab-switch" type="radio" name="tab" id="tab-sector">
-<div class="workspace"><aside class="rail"><div class="rail-title"><span>Navigation</span><b>Desk</b></div><label class="opps-tab" for="tab-opps">{count_badge('Command center', len(div_rows))}</label><label class="rsi-tab" for="tab-rsi">{count_badge('RSI Inflections', len(inflect_rows))}</label><label class="sqz-tab" for="tab-sqz">{count_badge('Squeeze Laggards', len(squeeze_rows))}</label><label class="val-tab" for="tab-val">{count_badge('Value Laggards', len(laggard_rows))}</label><label class="mom-tab" for="tab-mom">{count_badge('Momentum Pullbacks', len(pullback_rows))}</label><label class="brk-tab" for="tab-brk">{count_badge('RSI Breakout', len(inflect_breakout_rows))}</label><label class="rspb-tab" for="tab-rspb">{count_badge('RS Pullbacks', len(rs_pullback_rows))}</label><label class="master-tab" for="tab-master">{count_badge('EV Master', len(master_rows))}</label><label class="sector-tab" for="tab-sector">{count_badge('By Sector', len(top_sector))}</label><a class="factor-link" href="factor-baskets.html">Factor / theme map →</a></aside>
-<section class="main-stage"><section class="kpi-strip">{kpi_html}</section><section class="method-panel"><div><h2>Trader cockpit, not a spreadsheet</h2><p>Rankings remain deterministic: six sleeve scores, sector caps, live Polygon snapshot price overlays, and web-sourced top-ten commentary. The layout is optimized for fast scanning on mobile and desktop: KPI strip first, sticky navigation, card-first opportunities, then drill-down tables.</p></div><div class="method-facts"><span><b>Known</b>Prices, technicals, sectors, and factor fields from local Polygon/DuckDB.</span><span><b>Estimated</b>Composite scores from normalized warehouse fields.</span><span><b>Unknown</b>Unextracted catalysts or risks need manual source review.</span><span><b>Constraint</b>Top ten capped at max 3 names per sector.</span></div></section>
-<nav class="tab-nav" aria-label="Opportunity sections"><label class="opps-tab" for="tab-opps">Command <b>{len(div_rows)}</b></label><label class="rsi-tab" for="tab-rsi">RSI <b>{len(inflect_rows)}</b></label><label class="sqz-tab" for="tab-sqz">Squeeze <b>{len(squeeze_rows)}</b></label><label class="val-tab" for="tab-val">Value <b>{len(laggard_rows)}</b></label><label class="mom-tab" for="tab-mom">Momentum <b>{len(pullback_rows)}</b></label><label class="brk-tab" for="tab-brk">Breakout <b>{len(inflect_breakout_rows)}</b></label><label class="rspb-tab" for="tab-rspb">RS Pullback <b>{len(rs_pullback_rows)}</b></label><label class="master-tab" for="tab-master">EV Master <b>{len(master_rows)}</b></label><label class="sector-tab" for="tab-sector">Sectors <b>{len(top_sector)}</b></label></nav>
+<body class="revamp-v3"><header class="site-hero"><div class="hero-inner"><div class="brand-lockup"><div class="brand-mark">◈</div><div class="brand-copy"><h1>Equity Screener</h1><p>Production multi-sleeve screen · generated {html.escape(now_et.strftime('%Y-%m-%d %H:%M %Z'))}</p></div></div><div class="hero-actions"><span class="status-pill live">● Live</span><span class="status-pill">latest 4h {html.escape(latest_ts)}</span><span class="status-pill">price &lt; ${price_filter:.0f}</span><a class="active" href="index.html">Cockpit</a><a href="factor-baskets.html">Themes</a></div></div></header>
+<main class="dashboard-app" id="top"><input class="tab-switch" type="radio" name="tab" id="tab-opps" checked><input class="tab-switch" type="radio" name="tab" id="tab-rsi"><input class="tab-switch" type="radio" name="tab" id="tab-sqz"><input class="tab-switch" type="radio" name="tab" id="tab-val"><input class="tab-switch" type="radio" name="tab" id="tab-lead"><input class="tab-switch" type="radio" name="tab" id="tab-mom"><input class="tab-switch" type="radio" name="tab" id="tab-brk"><input class="tab-switch" type="radio" name="tab" id="tab-rspb"><input class="tab-switch" type="radio" name="tab" id="tab-master"><input class="tab-switch" type="radio" name="tab" id="tab-sector">
+<div class="workspace"><aside class="rail"><div class="rail-title"><span>Navigation</span><b>Desk</b></div><label class="opps-tab" for="tab-opps">{count_badge('Command center', len(div_rows))}</label><label class="rsi-tab" for="tab-rsi">{count_badge('RSI Inflections', len(inflect_rows))}</label><label class="sqz-tab" for="tab-sqz">{count_badge('Squeeze Laggards', len(squeeze_rows))}</label><label class="val-tab" for="tab-val">{count_badge('Value Laggards', len(laggard_rows))}</label><label class="lead-tab" for="tab-lead">{count_badge('Momentum Leaders', len(leader_rows))}</label><label class="mom-tab" for="tab-mom">{count_badge('Momentum Pullbacks', len(pullback_rows))}</label><label class="brk-tab" for="tab-brk">{count_badge('RSI Breakout', len(inflect_breakout_rows))}</label><label class="rspb-tab" for="tab-rspb">{count_badge('RS Pullbacks', len(rs_pullback_rows))}</label><label class="master-tab" for="tab-master">{count_badge('EV Master', len(master_rows))}</label><label class="sector-tab" for="tab-sector">{count_badge('By Sector', len(top_sector))}</label><a class="factor-link" href="factor-baskets.html">Factor / theme map →</a></aside>
+<section class="main-stage"><section class="kpi-strip">{kpi_html}</section><section class="method-panel"><div><h2>Signal methodology</h2><p>Scores are deterministic 0-100 composites from local Polygon/DuckDB price, volume, RSI, valuation, sector, and factor data. Every defined factor is populated for every stock; eligibility flags only choose which names appear in each sleeve.</p></div><div class="method-facts"><span><b>Known</b>Prices, technicals, sectors, and factor fields from local Polygon/DuckDB.</span><span><b>Estimated</b>Composite scores from normalized warehouse fields.</span><span><b>Unknown</b>Unextracted catalysts or risks need manual source review.</span><span><b>Constraint</b>Top ten capped at max 3 names per sector.</span></div></section>
+<nav class="tab-nav" aria-label="Opportunity sections"><label class="opps-tab" for="tab-opps">Command <b>{len(div_rows)}</b></label><label class="rsi-tab" for="tab-rsi">RSI <b>{len(inflect_rows)}</b></label><label class="sqz-tab" for="tab-sqz">Squeeze <b>{len(squeeze_rows)}</b></label><label class="val-tab" for="tab-val">Value <b>{len(laggard_rows)}</b></label><label class="lead-tab" for="tab-lead">Leaders <b>{len(leader_rows)}</b></label><label class="mom-tab" for="tab-mom">Momentum <b>{len(pullback_rows)}</b></label><label class="brk-tab" for="tab-brk">Breakout <b>{len(inflect_breakout_rows)}</b></label><label class="rspb-tab" for="tab-rspb">RS Pullback <b>{len(rs_pullback_rows)}</b></label><label class="master-tab" for="tab-master">EV Master <b>{len(master_rows)}</b></label><label class="sector-tab" for="tab-sector">Sectors <b>{len(top_sector)}</b></label></nav>
 <div class="tab-content" id="c-opps">{stage_intro('Command center','Multi-sleeve top 10 opportunities','The fastest read: diversified top names across all sleeves, live price overlay, score stack, and web-sourced qualitative checks.', len(div_rows))}<div class="signal-grid">{''.join(div_cards)}</div><div class="data-panel"><div class="panel-title"><h3>Top 10 opportunity table</h3><span>desktop audit trail</span></div><div class="table-wrap">{header}{''.join(div_rows)}</tbody></table></div></div><div class="data-panel"><div class="panel-title"><h3>Web-sourced deep dive</h3><span>top diversified names</span></div><div class="grid">{''.join(analysis_cards)}</div></div><div class="data-panel"><div class="panel-title"><h3>Top 25 diversified ranked opportunities</h3><span>sector capped</span></div><div class="table-wrap">{header}{''.join(top_rows)}</tbody></table></div></div></div>
 <div class="tab-content" id="c-rsi">{stage_intro('Inflection','RSI inflection + value','Mean-reversion/value names where 4h RSI is turning upward from washed-out or improving setups.', len(inflect_rows))}<div class="signal-grid">{''.join(inflect_cards)}</div><div class="data-panel"><div class="panel-title"><h3>RSI inflection sleeve</h3><span>ranked by RSI/value score</span></div><div class="table-wrap">{header}{''.join(inflect_rows)}</tbody></table></div></div></div>
 <div class="tab-content" id="c-sqz">{stage_intro('Pressure','Shorted near lows / peer lag','Short-heavy names near lows where peer lag and volume make the squeeze asymmetry visible.', len(squeeze_rows))}<div class="signal-grid">{''.join(squeeze_cards)}</div><div class="data-panel"><div class="panel-title"><h3>Shorted near lows / peer lag sleeve</h3><span>ranked by squeeze laggard score</span></div><div class="table-wrap">{header}{''.join(squeeze_rows)}</tbody></table></div></div></div>
 <div class="tab-content" id="c-val">{stage_intro('Reversion','Cheap peer laggard sleeve','Cheap names that have lagged their sector/peers and may offer catch-up convexity.', len(laggard_rows))}<div class="signal-grid">{''.join(laggard_cards)}</div><div class="data-panel"><div class="panel-title"><h3>Cheap peer laggard sleeve</h3><span>ranked by value lag score</span></div><div class="table-wrap">{header}{''.join(laggard_rows)}</tbody></table></div></div></div>
+<div class="tab-content" id="c-lead">{stage_intro('Markup','Momentum leaders / wave-3 candidates','Strong 3-6 month relative performers with trend alignment, constructive RSI, volume confirmation, and controlled distribution risk.', len(leader_rows))}<div class="signal-grid">{''.join(leader_cards)}</div><div class="data-panel"><div class="panel-title"><h3>Momentum leader sleeve</h3><span>ranked by leader / wave-3 score</span></div><div class="table-wrap">{header}{''.join(leader_rows)}</tbody></table></div></div></div>
 <div class="tab-content" id="c-mom">{stage_intro('Continuation','Momentum pullback sleeve','Strong 6-month relative winners that pulled back recently and are coiling near moving-average support.', len(pullback_rows))}<div class="signal-grid">{''.join(pullback_cards)}</div><div class="data-panel"><div class="panel-title"><h3>Momentum pullback sleeve</h3><span>continuation setup</span></div><div class="table-wrap">{header}{''.join(pullback_rows)}</tbody></table></div></div></div>
 <div class="tab-content" id="c-brk">{stage_intro('Expansion','RSI breakout / inflection sleeve','Stocks where RSI is turning up from the 40-60 mid-range with volume expansion and sector tailwind.', len(inflect_breakout_rows))}<div class="signal-grid">{''.join(inflect_breakout_cards)}</div><div class="data-panel"><div class="panel-title"><h3>RSI breakout / inflection sleeve</h3><span>early breakout setup</span></div><div class="table-wrap">{header}{''.join(inflect_breakout_rows)}</tbody></table></div></div></div>
 <div class="tab-content" id="c-rspb">{stage_intro('Reset','Relative strength pullback sleeve','Winning-sector stocks with strong 3-month momentum that sold off this week into support/demand zones.', len(rs_pullback_rows))}<p class="note"><span class="pill">RS Pullback</span> Gate: sector 1-month return &gt; -2%, stock near sector 3-month momentum, 1-week pullback &lt; -1%, and not too extended from the 52-week low (&lt;40%). Scored by sector strength, relative strength, pullback depth, SMA proximity, and RSI reset.</p><div class="signal-grid">{''.join(rs_pullback_cards)}</div><div class="data-panel"><div class="panel-title"><h3>Relative strength pullback sleeve</h3><span>reset setup</span></div><div class="table-wrap">{header}{''.join(rs_pullback_rows)}</tbody></table></div></div></div>
@@ -1511,7 +1564,7 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Factor Basket Inflections</title><style>{css}</style></head>
 <body class="revamp-v3"><header class="site-hero"><div class="hero-inner"><div class="brand-lockup"><div class="brand-mark">◎</div><div class="brand-copy"><h1>Factor + Theme Map</h1><p>Lagging baskets, keyword themes, and under-$75 opportunity drilldowns</p></div></div><div class="hero-actions"><span class="status-pill live">● Live</span><span class="status-pill">generated {html.escape(now_et.strftime('%Y-%m-%d %H:%M %Z'))}</span><span class="status-pill">price &lt; ${price_filter:.0f}</span><a href="index.html">Cockpit</a><a class="active" href="factor-baskets.html">Themes</a></div></div></header>
-<main class="page-shell"><section class="kpi-strip">{kpi_html}</section><section class="method-panel"><div><h2>Jekyll-compatible static theme surface</h2><p>Production factor baskets and Polygon keyword themes are separated from the main cockpit so the trader can scan macro/beneficiary clusters first, then drill into names inside the selected lagging or inflecting group.</p></div><div class="method-facts"><span><b>Selected factor</b>{html.escape(selected_basket)}</span><span><b>Selected theme</b>{html.escape(selected_theme)}</span><span><b>Known</b>Warehouse factor and keyword fields.</span><span><b>Estimated</b>Composite reversal scores.</span></div></section><div class="page-panel"><div class="panel-title"><h3>Production factor basket score + momentum analysis</h3><span>basket reversal model</span></div><div class="table-wrap">{factor_header}{''.join(factor_rows)}</tbody></table></div></div><div class="page-panel"><div class="panel-title"><h3>Best opportunities within selected factor: {html.escape(selected_basket)}</h3><span>under ${price_filter:.0f}</span></div><div class="table-wrap">{header}{''.join(factor_opp_rows)}</tbody></table></div></div><div class="page-panel"><div class="panel-title"><h3>Keyword / theme basket score + momentum analysis</h3><span>beneficiary clusters</span></div><div class="table-wrap">{theme_header}{''.join(theme_rows)}</tbody></table></div></div><div class="page-panel"><div class="panel-title"><h3>Best opportunities within selected keyword theme: {html.escape(selected_theme)}</h3><span>theme drilldown</span></div><div class="table-wrap">{header}{''.join(theme_opp_rows)}</tbody></table></div></div><div class="footer">Known: production factor baskets, primary keyword factors, prices, technicals, returns, and factor scores from local Polygon/DuckDB warehouse. Estimated: reversal scores are deterministic composites of basket lag, keyword relevance, and short-term inflection.</div></main></body></html>"""
+<main class="page-shell"><section class="kpi-strip">{kpi_html}</section><section class="method-panel"><div><h2>Theme and factor breadth</h2><p>Production factor baskets and Polygon keyword themes show where quantitative breadth is lagging, inflecting, or leading. Drilldowns use the same populated sleeve scores as the main screen.</p></div><div class="method-facts"><span><b>Selected factor</b>{html.escape(selected_basket)}</span><span><b>Selected theme</b>{html.escape(selected_theme)}</span><span><b>Known</b>Warehouse factor and keyword fields.</span><span><b>Estimated</b>Composite reversal scores.</span></div></section><div class="page-panel"><div class="panel-title"><h3>Production factor basket score + momentum analysis</h3><span>basket reversal model</span></div><div class="table-wrap">{factor_header}{''.join(factor_rows)}</tbody></table></div></div><div class="page-panel"><div class="panel-title"><h3>Best opportunities within selected factor: {html.escape(selected_basket)}</h3><span>under ${price_filter:.0f}</span></div><div class="table-wrap">{header}{''.join(factor_opp_rows)}</tbody></table></div></div><div class="page-panel"><div class="panel-title"><h3>Keyword / theme basket score + momentum analysis</h3><span>beneficiary clusters</span></div><div class="table-wrap">{theme_header}{''.join(theme_rows)}</tbody></table></div></div><div class="page-panel"><div class="panel-title"><h3>Best opportunities within selected keyword theme: {html.escape(selected_theme)}</h3><span>theme drilldown</span></div><div class="table-wrap">{header}{''.join(theme_opp_rows)}</tbody></table></div></div><div class="footer">Known: production factor baskets, primary keyword factors, prices, technicals, returns, and factor scores from local Polygon/DuckDB warehouse. Estimated: reversal scores are deterministic composites of basket lag, keyword relevance, and short-term inflection.</div></main></body></html>"""
     (DOCS_DIR / "factor-baskets.html").write_text(factor_content)
     (DOCS_DIR / "index.html").write_text(content)
 
