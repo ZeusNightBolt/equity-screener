@@ -82,6 +82,9 @@ src/equity_screener/deploy.py     git commit/push
 | High | `build_diversified_top10()` used cumulative quota values in a way that filled the top 10 before momentum/RS-breakout sleeves could contribute. | Added `DIVERSIFIED_TOP_PLAN` and made `add_from()` enforce per-sleeve quotas. |
 | High | `git_commit_push()` always pushed `origin main`, which would fail to publish commits made on any non-main branch and violates branch-first repo hygiene. | Pushes the current checked-out branch now. |
 | Medium | `score_candidates()` mutated the input DataFrame in place, making downstream tests/refactors harder to reason about. | It now returns a scored copy. |
+| Medium | `record()` omitted `rel_strength_pullback_score` and treated `price_source` as numeric, so JSON payloads lost both fields. | Added payload contract tests; `record()` now preserves `price_source` and RS pullback score. |
+| Medium | `diversified_top10` CSV flag used a different selection algorithm/index basis than the dashboard top-10 builder. | It is now computed from `build_diversified_top10()` after the final sort/reset. |
+| Medium | `call_llm()` had narrow exception handling for network/SSL edge cases. | It now fails soft on any LLM exception and returns a diagnostic string. |
 | Medium | Mobile cards omitted the Relative Strength Pullback score even though desktop/master views showed it. | Mobile score rows are generated dynamically from `SCORE_DISPLAY`, including `RS Pb`. |
 | Medium | Master opportunity comparison hard-coded six sleeve rows; future sleeves would require multiple edits. | Master comparison rows are generated from `SCORE_DISPLAY[1:]`. |
 | Medium | Dashboard note said the top 10 blended five sleeves; the model actually uses six. | Note now says six sleeves. |

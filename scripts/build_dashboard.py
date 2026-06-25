@@ -524,9 +524,10 @@ def score_candidates(df: pd.DataFrame) -> pd.DataFrame:
     df["rank_in_sector"] = df.groupby("sector")["opportunity_score"].rank(method="first", ascending=False).astype(int)
     df["global_rank"] = df["opportunity_score"].rank(method="first", ascending=False).astype(int)
     df["is_top_inflection"] = (df["inflection_flag"] == 1) & (df["rsi_delta_1"] > 0) & (df["rsi_accel"] > 0)
-    diversified = cap_by_sector(df, "opportunity_score", 10, 3)
-    df["diversified_top10"] = df.index.isin(diversified.index)
-    return df.sort_values("opportunity_score", ascending=False).reset_index(drop=True)
+    sorted_df = df.sort_values("opportunity_score", ascending=False).reset_index(drop=True)
+    diversified = build_diversified_top10(sorted_df, 3)
+    sorted_df["diversified_top10"] = sorted_df.index.isin(diversified.index)
+    return sorted_df
 
 def call_llm(prompt: str) -> str:
     deepseek_key = os.environ.get("DEEPSEEK_API_KEY")
@@ -565,7 +566,7 @@ def call_llm(prompt: str) -> str:
         with urllib.request.urlopen(req, timeout=45) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
         return payload["choices"][0]["message"]["content"].strip()
-    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, KeyError, json.JSONDecodeError) as exc:
+    except Exception as exc:
         return f"LLM call failed: {type(exc).__name__}: {exc}"
 
 
@@ -873,7 +874,7 @@ def record(row) -> dict:
     keys = [
         "global_rank", "rank_in_sector", "sector", "ticker", "company", "market_cap", "four_h_close", "display_close", "price_source", "latest_daily_close",
         "diversified_source",
-        "opportunity_score", "rsi_value_score", "squeeze_laggard_score", "value_laggard_score", "momentum_pullback_score", "inflect_breakout_score", "ev_score",
+        "opportunity_score", "rsi_value_score", "squeeze_laggard_score", "value_laggard_score", "momentum_pullback_score", "rel_strength_pullback_score", "inflect_breakout_score", "ev_score",
         "rsi_acceleration_score", "composite_value_score", "rsi0", "rsi1", "rsi2", "rsi3", "rsi4", "rsi5", "rsi_delta_1",
         "prior_delta_3_avg", "rsi_accel", "inflection_flag", "yf_forward_pe", "yf_trailing_pe",
         "yf_price_to_book", "yf_peg_ratio", "from_52w_high_pct", "from_52w_low_pct", "short_pct_float",
@@ -886,7 +887,7 @@ def record(row) -> dict:
     out = {}
     for key in keys:
         value = row.get(key)
-        if key in {"sector", "ticker", "company", "value_grade", "growth_grade", "momentum_grade", "primary_strategy", "diversified_source", "production_factor_basket", "production_theme", "primary_keyword_factor", "keyword_factor_baskets"}:
+        if key in {"sector", "ticker", "company", "price_source", "value_grade", "growth_grade", "momentum_grade", "primary_strategy", "diversified_source", "production_factor_basket", "production_theme", "primary_keyword_factor", "keyword_factor_baskets"}:
             out[key] = None if pd.isna(value) else str(value)
         elif key in {"four_h_timestamp", "latest_daily_timestamp"}:
             out[key] = str(value)
