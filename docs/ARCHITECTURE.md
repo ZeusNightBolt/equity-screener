@@ -77,16 +77,25 @@ The June 25 full revamp changed the generated surface from a dense table-first p
 - separate factor/theme map page using the same shell;
 - Jekyll/GitHub Pages scaffold under `docs/_config.yml` and `docs/_layouts/default.html` so future static docs can use layout/theme conventions instead of ad hoc pages.
 
-This is the first cleanup step toward a fully modular package. Next natural split:
+The former monolith is now split into a modular package:
 
 ```text
-scripts/build_dashboard.py        thin CLI/orchestrator
-src/equity_screener/config.py     score/tab metadata
-src/equity_screener/data.py       DuckDB queries
-src/equity_screener/scoring.py    sleeve scoring
-src/equity_screener/render.py     HTML/JSON rendering
-src/equity_screener/deploy.py     git commit/push
+scripts/build_dashboard.py                  26-line compatibility CLI
+scripts/equity_screener/config.py           paths, score contracts, labels, colors
+scripts/equity_screener/data.py             env + DuckDB candidate query
+scripts/equity_screener/scoring.py          factor scores, gates, wave-stage classifier
+scripts/equity_screener/selection.py        sector caps, diversified top-10, final tickers
+scripts/equity_screener/polygon_overlay.py  live Polygon snapshot overlay
+scripts/equity_screener/commentary.py       web extraction + LLM commentary
+scripts/equity_screener/serialization.py    JSON record contract
+scripts/equity_screener/render_helpers.py   formatting and cell renderers
+scripts/equity_screener/baskets.py          factor/theme basket analytics
+scripts/equity_screener/render.py           static HTML/data artifact rendering
+scripts/equity_screener/git_ops.py          commit/push helper
+scripts/equity_screener/main.py             CLI orchestration
 ```
+
+See `docs/2026-06-25_wave-logic-and-modularization-audit.md` for the wave-stage audit and post-split module inventory.
 
 ## Audit findings fixed in this cleanup
 
@@ -109,10 +118,10 @@ src/equity_screener/deploy.py     git commit/push
 
 ## Remaining technical debt
 
-- `scripts/build_dashboard.py` is still a large monolith (~1.5k lines). The next cleanup should split data, scoring, rendering, and deployment into modules under `src/equity_screener/`.
 - Search/extraction failures intentionally degrade silently for dashboard uptime. If qualitative commentary quality becomes important, replace broad `except Exception: return []` with structured warnings in the JSON payload.
-- The generated HTML is still string-template heavy. A small template file or Jinja-free renderer module would make tab additions safer.
-- No formal pytest suite exists. Current verification is command-based: syntax check, full no-LLM build, JSON payload counts, HTML marker checks.
+- `render.py` is still string-template heavy. A small template file or Jinja-free renderer module would make tab additions safer.
+- Scoring currently writes many columns one-by-one and emits pandas fragmentation warnings in tests/builds. This is not a correctness issue, but a future performance cleanup should batch derived columns via `assign()`/`concat()`.
+- The wave labels are deterministic stage proxies, not validated Elliott-wave counts. Forward-return validation by wave stage is still needed before sizing trades from them.
 
 ## Verification commands
 
