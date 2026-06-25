@@ -15,6 +15,7 @@ import pandas as pd
 
 from equity_screener.baskets import factor_basket_analysis, keyword_theme_analysis
 from equity_screener.polygon_overlay import enrich_latest_polygon_prices
+from equity_screener.divergence import top10_factor_alignment
 from equity_screener.scoring import score_candidates
 from equity_screener.selection import build_diversified_top10, mark_diversified_top10
 from equity_screener.serialization import record
@@ -128,9 +129,29 @@ class BuildDashboardContractTest(unittest.TestCase):
         self.assertEqual(enriched.loc[1, 'display_close'], 410.0)
         self.assertEqual(enriched.loc[1, 'latest_polygon_price_status'], 'ERROR')
         self.assertTrue(pd.isna(enriched.loc[2, 'latest_polygon_price']))
+    def test_top10_factor_alignment_flags_avoid_basket_divergence(self):
+        top10 = pd.DataFrame({
+            'ticker': ['BAD', 'GOOD'],
+            'company': ['Broken Setup Inc', 'Confirmed Setup Inc'],
+            'sector': ['Tech', 'Industrials'],
+            'production_factor_basket': ['Broken Momentum / Avoid', 'Quality / Low-Vol Uptrend'],
+            'primary_strategy': ['RSI inflection + value', 'momentum leader'],
+            'opportunity_score': [88, 82],
+            'rsi0': [42, 61],
+            'ret_1m_pct': [-12, 4],
+            'wave_stage': ['recovery attempt', 'wave 3 markup'],
+        })
+
+        out = top10_factor_alignment(top10)
+
+        self.assertEqual(list(out['alignment_status']), ['DIVERGENCE', 'CONFIRMATION'])
+        self.assertIn('conflicts with Broken Momentum / Avoid', out.loc[0, 'alignment_takeaway'])
+        self.assertIn('confirms', out.loc[1, 'alignment_takeaway'])
+
     def test_generated_dashboard_has_revamp_navigation_and_jekyll_scaffold(self):
         index = (PROJECT_DIR / 'docs' / 'index.html').read_text()
         factor = (PROJECT_DIR / 'docs' / 'factor-baskets.html').read_text()
+        divergence = (PROJECT_DIR / 'docs' / 'divergence.html').read_text()
         config = (PROJECT_DIR / 'docs' / '_config.yml').read_text()
         layout = (PROJECT_DIR / 'docs' / '_layouts' / 'default.html').read_text()
 
@@ -144,6 +165,13 @@ class BuildDashboardContractTest(unittest.TestCase):
         ]:
             self.assertIn(marker, index)
         self.assertIn('Factor + Theme Map', factor)
+        self.assertIn('href="divergence.html"', index)
+        self.assertIn('href="divergence.html"', factor)
+        self.assertIn('Top-10 Divergence Monitor', divergence)
+        self.assertIn('DIVERGENCE', divergence)
+        self.assertIn('CONFIRMATION', divergence)
+        self.assertIn('vs Broken Momentum / Avoid', divergence)
+        self.assertIn('factor-alignment-card', divergence)
         self.assertIn('basket-names', factor)
         self.assertIn('Visible theme constituents', factor)
         self.assertIn('Cloud Software constituents', factor)
