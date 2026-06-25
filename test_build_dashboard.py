@@ -1,18 +1,33 @@
 #!/usr/bin/env python3
-import importlib.util
-import math
+import sys
 import unittest
+import warnings
 from pathlib import Path
+from types import SimpleNamespace
 
 
 PROJECT_DIR = Path(__file__).resolve().parent
+SCRIPTS_DIR = PROJECT_DIR / 'scripts'
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
 
 import pandas as pd
 
-MODULE_PATH = Path(__file__).resolve().parent / 'scripts' / 'build_dashboard.py'
-spec = importlib.util.spec_from_file_location('build_dashboard', MODULE_PATH)
-build_dashboard = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(build_dashboard)
+from equity_screener.baskets import factor_basket_analysis, keyword_theme_analysis
+from equity_screener.polygon_overlay import enrich_latest_polygon_prices
+from equity_screener.scoring import score_candidates
+from equity_screener.selection import build_diversified_top10, mark_diversified_top10
+from equity_screener.serialization import record
+
+build_dashboard = SimpleNamespace(
+    build_diversified_top10=build_diversified_top10,
+    factor_basket_analysis=factor_basket_analysis,
+    keyword_theme_analysis=keyword_theme_analysis,
+    enrich_latest_polygon_prices=enrich_latest_polygon_prices,
+    mark_diversified_top10=mark_diversified_top10,
+    record=record,
+    score_candidates=score_candidates,
+)
 
 
 class BuildDashboardContractTest(unittest.TestCase):
@@ -81,7 +96,7 @@ class BuildDashboardContractTest(unittest.TestCase):
             'primary_keyword_factor_score': list(range(12)),
             'keyword_factor_baskets': ['[]']*12,
         })
-        scored = build_dashboard.score_candidates(df)
+        scored = build_dashboard.mark_diversified_top10(build_dashboard.score_candidates(df))
         dynamic_tickers = set(build_dashboard.build_diversified_top10(scored, 3)['ticker'])
         flagged_tickers = set(scored.loc[scored['diversified_top10'], 'ticker'])
         self.assertEqual(flagged_tickers, dynamic_tickers)
@@ -129,6 +144,10 @@ class BuildDashboardContractTest(unittest.TestCase):
         ]:
             self.assertIn(marker, index)
         self.assertIn('Factor + Theme Map', factor)
+        self.assertIn('basket-names', factor)
+        self.assertIn('Best opportunities within selected keyword theme', factor)
+        self.assertIn('finviz.com/stock?t=', factor)
+        self.assertRegex(factor, r'(FOXA|TRMB|DBX|SAIL)')
         self.assertIn('theme: minima', config)
         self.assertIn('{{ content }}', layout)
         self.assertNotIn('{{D_DATA}}', index)
@@ -180,7 +199,11 @@ class BuildDashboardContractTest(unittest.TestCase):
             'primary_keyword_factor_score': [50]*6,
             'keyword_factor_baskets': ['[]']*6,
         })
-        scored = build_dashboard.score_candidates(df)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always', pd.errors.PerformanceWarning)
+            scored = build_dashboard.score_candidates(df)
+        perf_warnings = [w for w in caught if issubclass(w.category, pd.errors.PerformanceWarning)]
+        self.assertEqual(perf_warnings, [])
         for col in ['momentum_leader_score', 'momentum_pullback_score', 'rel_strength_pullback_score', 'inflect_breakout_score', 'wave_setup_score']:
             self.assertTrue(scored[col].notna().all(), col)
             self.assertTrue(scored[col].between(0, 100).all(), col)
