@@ -18,14 +18,17 @@ from .config import DB_PATH
 def _business_days_back(n: int) -> int:
     """Timestamp in ms for N business days ago (approximate)."""
     d = dt.date.today()
-    # Walk back, skipping weekends
     skipped = 0
     while skipped < n:
         d = d - dt.timedelta(days=1)
-        if d.weekday() < 5:  # Mon-Fri
+        if d.weekday() < 5:
             skipped += 1
-    # Return as epoch ms for start of that day UTC
     return int(dt.datetime.combine(d, dt.time.min, tzinfo=dt.timezone.utc).timestamp() * 1000)
+
+
+def _date_to_ms(year: int, month: int, day: int) -> int:
+    """Timestamp in ms for a given date at midnight UTC."""
+    return int(dt.datetime(year, month, day, tzinfo=dt.timezone.utc).timestamp() * 1000)
 
 
 def _snapshot_universe(snapshot_ts_ms: int) -> pd.DataFrame:
@@ -79,10 +82,18 @@ def _snapshot_universe(snapshot_ts_ms: int) -> pd.DataFrame:
       select ticker, close as ytd_start_close
       from (
         select ticker, close,
-               row_number() over(partition by ticker order by timestamp) rn
+               row_number() over(partition by ticker order by abs(timestamp - {int(dt.datetime(2026,1,1,tzinfo=dt.timezone.utc).timestamp()*1000)})) rn
         from daily_bars
-        where timestamp >= {int(dt.datetime(2026,1,1,tzinfo=dt.timezone.utc).timestamp()*1000)}
-          and close is not null
+        where close is not null
+      ) where rn = 1
+    ),
+    qtd_start as (
+      select ticker, close as qtd_start_close
+      from (
+        select ticker, close,
+               row_number() over(partition by ticker order by abs(timestamp - {int(dt.datetime(2026,4,1,tzinfo=dt.timezone.utc).timestamp()*1000)})) rn
+        from daily_bars
+        where close is not null
       ) where rn = 1
     ),
     base as (
@@ -91,6 +102,7 @@ def _snapshot_universe(snapshot_ts_ms: int) -> pd.DataFrame:
         coalesce(d.snap_close, r.close_now) display_close,
         r.close_now, r.close_1w, r.close_1m, r.close_3m, r.close_6m,
         y.ytd_start_close,
+        q.qtd_start_close,
         p.rsi0, p.rsi1, p.rsi2, p.rsi3, p.rsi4, p.rsi5,
         (p.rsi0 - p.rsi1) rsi_delta_1,
         ((p.rsi1-p.rsi2)+(p.rsi2-p.rsi3)+(p.rsi3-p.rsi4))/3.0 prior_delta_3_avg,
@@ -100,6 +112,7 @@ def _snapshot_universe(snapshot_ts_ms: int) -> pd.DataFrame:
       left join returns r on s.ticker=r.ticker
       left join rsi_piv p on s.ticker=p.ticker
       left join ytd_start y on s.ticker=y.ticker
+      left join qtd_start q on s.ticker=q.ticker
       where s.market_cap >= 5000000000
         and s.sector is not null and s.sector <> ''
     )
@@ -126,6 +139,11 @@ def _snapshot_universe(snapshot_ts_ms: int) -> pd.DataFrame:
     df["ret_ytd_pct"] = np.where(
         (df["ytd_start_close"].notna() & df["display_close"].notna() & (df["ytd_start_close"] > 0)),
         100.0 * (df["display_close"] - df["ytd_start_close"]) / df["ytd_start_close"],
+        np.nan,
+    )
+    df["ret_qtd_pct"] = np.where(
+        (df["qtd_start_close"].notna() & df["display_close"].notna() & (df["qtd_start_close"] > 0)),
+        100.0 * (df["display_close"] - df["qtd_start_close"]) / df["qtd_start_close"],
         np.nan,
     )
 
@@ -170,12 +188,10 @@ def universe_snapshot() -> pd.DataFrame:
     """
     from .scoring import score_candidates
 
-    # Today's full dataset (already scored elsewhere, but we rebuild snapshots)
-    ts_1w = _business_days_back(5)
-    ts_1m = _business_days_back(21)
-
     # Build today's snapshot and run scoring
     ts_today = int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
+    ts_ytd = _date_to_ms(2026, 1, 2)
+
     df_today = _snapshot_universe(ts_today)
     if df_today.empty:
         return df_today
@@ -183,39 +199,34 @@ def universe_snapshot() -> pd.DataFrame:
     scored_today = score_candidates(df_today)
 
     # Build historical snapshots
-    df_1w = _snapshot_universe(ts_1w)
-    df_1m = _snapshot_universe(ts_1m)
+    df_1w = _snapshot_universe(_business_days_back(5))
+    df_1m = _snapshot_universe(_business_days_back(21))
+    df_ytd = _snapshot_universe(ts_ytd)
 
-    # Run simplified scoring on historical snapshots
     scored_1w = score_candidates(df_1w) if not df_1w.empty else pd.DataFrame()
     scored_1m = score_candidates(df_1m) if not df_1m.empty else pd.DataFrame()
+    scored_ytd = score_candidates(df_ytd) if not df_ytd.empty else pd.DataFrame()
 
     # Merge today's scores with historical
     out = scored_today[["ticker", "company", "sector", "market_cap", "display_close",
-                         "opportunity_score", "ret_ytd_pct", "primary_strategy"]].copy()
+                         "opportunity_score", "ret_ytd_pct", "ret_qtd_pct", "primary_strategy"]].copy()
 
     # Add historical opportunity_scores
-    if not scored_1w.empty:
-        hist_1w = scored_1w[["ticker", "opportunity_score"]].rename(
-            columns={"opportunity_score": "composite_1w_ago"}
-        )
-        out = out.merge(hist_1w, on="ticker", how="left")
-    else:
-        out["composite_1w_ago"] = np.nan
-
-    if not scored_1m.empty:
-        hist_1m = scored_1m[["ticker", "opportunity_score"]].rename(
-            columns={"opportunity_score": "composite_1m_ago"}
-        )
-        out = out.merge(hist_1m, on="ticker", how="left")
-    else:
-        out["composite_1m_ago"] = np.nan
+    for label, scored_df in [("composite_1w_ago", scored_1w), ("composite_1m_ago", scored_1m), ("composite_ytd_ago", scored_ytd)]:
+        if not scored_df.empty:
+            hist = scored_df[["ticker", "opportunity_score"]].rename(
+                columns={"opportunity_score": label}
+            )
+            out = out.merge(hist, on="ticker", how="left")
+        else:
+            out[label] = np.nan
 
     # Compute deltas
     out["score_delta_1w"] = out["opportunity_score"] - out["composite_1w_ago"]
     out["score_delta_1m"] = out["opportunity_score"] - out["composite_1m_ago"]
+    out["score_delta_ytd"] = out["opportunity_score"] - out["composite_ytd_ago"]
 
-    # Sort by sector then market_cap desc
-    out = out.sort_values(["sector", "market_cap"], ascending=[True, False]).reset_index(drop=True)
+    # Sort by sector then YTD score delta desc (best improvement to worst deterioration)
+    out = out.sort_values(["sector", "score_delta_ytd"], ascending=[True, False]).reset_index(drop=True)
 
     return out
