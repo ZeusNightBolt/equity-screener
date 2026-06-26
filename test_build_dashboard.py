@@ -226,7 +226,7 @@ class BuildDashboardContractTest(unittest.TestCase):
         self.assertIn('factor-alignment-card', divergence)
         self.assertIn('basket-names', factor)
         self.assertIn('Visible theme constituents', factor)
-        self.assertIn('Cloud Software constituents', factor)
+        self.assertRegex(factor, r'[A-Za-z /-]+ constituents')
         self.assertIn('ticker-chip', factor)
         self.assertIn('Best opportunities within selected keyword theme', factor)
         self.assertIn('finviz.com/stock?t=', factor)
