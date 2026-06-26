@@ -12,6 +12,7 @@ from .divergence import top10_factor_alignment
 from .render_helpers import fmt_bn, fmt_money, fmt_num, render_bar, render_rank_badge, render_rsi_cell, render_score_cell, render_sparkline, ticker_link
 from .selection import build_diversified_top10, cap_by_sector
 from .serialization import record
+from .universe import universe_snapshot
 
 def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float) -> None:
     DOCS_DIR.mkdir(parents=True, exist_ok=True)
@@ -439,7 +440,7 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
     content = f"""<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Equity Screener</title><style>{css}{theme_css}</style></head>
-<body class="revamp-v3"><header class="site-hero"><div class="hero-inner"><div class="brand-lockup"><div class="brand-mark">◈</div><div class="brand-copy"><h1>Equity Screener</h1><p>Production multi-sleeve screen · generated {html.escape(now_et.strftime('%Y-%m-%d %H:%M %Z'))}</p></div></div><div class="hero-actions"><span class="status-pill live">● Live</span><span class="status-pill">latest 4h {html.escape(latest_ts)}</span><span class="status-pill">price &lt; ${price_filter:.0f}</span><a class="active" href="index.html">Cockpit</a><a href="factor-baskets.html">Themes</a><a href="divergence.html">Divergence</a></div></div></header>
+<body class="revamp-v3"><header class="site-hero"><div class="hero-inner"><div class="brand-lockup"><div class="brand-mark">◈</div><div class="brand-copy"><h1>Equity Screener</h1><p>Production multi-sleeve screen · generated {html.escape(now_et.strftime('%Y-%m-%d %H:%M %Z'))}</p></div></div><div class="hero-actions"><span class="status-pill live">● Live</span><span class="status-pill">latest 4h {html.escape(latest_ts)}</span><span class="status-pill">price &lt; ${price_filter:.0f}</span><a class="active" href="index.html">Cockpit</a><a href="factor-baskets.html">Themes</a><a href="divergence.html">Divergence</a><a href="universe.html">Universe</a></div></div></header>
 <main class="dashboard-app" id="top"><input class="tab-switch" type="radio" name="tab" id="tab-opps" checked><input class="tab-switch" type="radio" name="tab" id="tab-top25"><input class="tab-switch" type="radio" name="tab" id="tab-rsi"><input class="tab-switch" type="radio" name="tab" id="tab-sqz"><input class="tab-switch" type="radio" name="tab" id="tab-val"><input class="tab-switch" type="radio" name="tab" id="tab-lead"><input class="tab-switch" type="radio" name="tab" id="tab-mom"><input class="tab-switch" type="radio" name="tab" id="tab-brk"><input class="tab-switch" type="radio" name="tab" id="tab-rspb"><input class="tab-switch" type="radio" name="tab" id="tab-master"><input class="tab-switch" type="radio" name="tab" id="tab-sector">
 <div class="workspace"><aside class="rail"><div class="rail-title"><span>Navigation</span><b>Desk</b></div><label class="opps-tab" for="tab-opps">{count_badge('Command center', len(div_rows))}</label><label class="top25-tab" for="tab-top25">{count_badge('Combined Top 25', len(combined_rows))}</label><label class="rsi-tab" for="tab-rsi">{count_badge('RSI Inflections', len(inflect_rows))}</label><label class="sqz-tab" for="tab-sqz">{count_badge('Squeeze Laggards', len(squeeze_rows))}</label><label class="val-tab" for="tab-val">{count_badge('Value Laggards', len(laggard_rows))}</label><label class="lead-tab" for="tab-lead">{count_badge('Momentum Leaders', len(leader_rows))}</label><label class="mom-tab" for="tab-mom">{count_badge('Momentum Pullbacks', len(pullback_rows))}</label><label class="brk-tab" for="tab-brk">{count_badge('RSI Breakout', len(inflect_breakout_rows))}</label><label class="rspb-tab" for="tab-rspb">{count_badge('RS Pullbacks', len(rs_pullback_rows))}</label><label class="master-tab" for="tab-master">{count_badge('EV Master', len(master_rows))}</label><label class="sector-tab" for="tab-sector">{count_badge('By Sector', len(top_sector))}</label><a class="factor-link" href="factor-baskets.html">Factor / theme map →</a><a class="factor-link" href="divergence.html">Divergence monitor →</a></aside>
 <section class="main-stage"><section class="kpi-strip">{kpi_html}</section><section class="method-panel"><div><h2>Signal methodology</h2><p>Scores are deterministic 0-100 composites from local Polygon/DuckDB price, volume, RSI, valuation, sector, and factor data. Every defined factor is populated for every stock; eligibility flags only choose which names appear in each sleeve.</p></div><div class="method-facts"><span><b>Known</b>Prices, technicals, sectors, and factor fields from local Polygon/DuckDB.</span><span><b>Estimated</b>Composite scores from normalized warehouse fields.</span><span><b>Unknown</b>Unextracted catalysts or risks need manual source review.</span><span><b>Constraint</b>Top ten capped at max 3 names per sector.</span></div></section>
@@ -461,13 +462,88 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
     factor_content = f"""<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Factor Basket Inflections</title><style>{css}{theme_css}</style></head>
-<body class="revamp-v3"><header class="site-hero"><div class="hero-inner"><div class="brand-lockup"><div class="brand-mark">◎</div><div class="brand-copy"><h1>Factor + Theme Map</h1><p>Lagging baskets, keyword themes, and under-$75 opportunity drilldowns</p></div></div><div class="hero-actions"><span class="status-pill live">● Live</span><span class="status-pill">generated {html.escape(now_et.strftime('%Y-%m-%d %H:%M %Z'))}</span><span class="status-pill">price &lt; ${price_filter:.0f}</span><a href="index.html">Cockpit</a><a class="active" href="factor-baskets.html">Themes</a><a href="divergence.html">Divergence</a></div></div></header>
+<body class="revamp-v3"><header class="site-hero"><div class="hero-inner"><div class="brand-lockup"><div class="brand-mark">◎</div><div class="brand-copy"><h1>Factor + Theme Map</h1><p>Lagging baskets, keyword themes, and under-$75 opportunity drilldowns</p></div></div><div class="hero-actions"><span class="status-pill live">● Live</span><span class="status-pill">generated {html.escape(now_et.strftime('%Y-%m-%d %H:%M %Z'))}</span><span class="status-pill">price &lt; ${price_filter:.0f}</span><a href="index.html">Cockpit</a><a class="active" href="factor-baskets.html">Themes</a><a href="divergence.html">Divergence</a><a href="universe.html">Universe</a></div></div></header>
 <main class="page-shell"><section class="kpi-strip">{kpi_html}</section><section class="method-panel"><div><h2>Theme and factor breadth</h2><p>Production factor baskets and Polygon keyword themes show where quantitative breadth is lagging, inflecting, or leading. Drilldowns use the same populated sleeve scores as the main screen.</p></div><div class="method-facts"><span><b>Selected factor</b>{html.escape(selected_basket)}</span><span><b>Selected theme</b>{html.escape(selected_theme)}</span><span><b>Known</b>Warehouse factor and keyword fields.</span><span><b>Estimated</b>Composite reversal scores.</span></div></section><div class="page-panel"><div class="panel-title"><h3>Visible factor constituents</h3><span>tickers and company names</span></div><div class="constituent-grid">{factor_cards_html}</div></div><div class="page-panel"><div class="panel-title"><h3>Production factor basket score + momentum analysis</h3><span>basket reversal model</span></div><div class="table-wrap">{factor_header}{''.join(factor_rows)}</tbody></table></div></div><div class="page-panel"><div class="panel-title"><h3>Best opportunities within selected factor: {html.escape(selected_basket)}</h3><span>under ${price_filter:.0f}</span></div><div class="table-wrap">{header}{''.join(factor_opp_rows)}</tbody></table></div></div><div class="page-panel"><div class="panel-title"><h3>Visible theme constituents</h3><span>theme tickers and company names</span></div><div class="constituent-grid">{theme_cards_html}</div></div><div class="page-panel"><div class="panel-title"><h3>Keyword / theme basket score + momentum analysis</h3><span>beneficiary clusters</span></div><div class="table-wrap">{theme_header}{''.join(theme_rows)}</tbody></table></div></div><div class="page-panel"><div class="panel-title"><h3>Best opportunities within selected keyword theme: {html.escape(selected_theme)}</h3><span>theme drilldown</span></div><div class="selected-theme-strip"><h3>{html.escape(selected_theme)} constituents</h3><p>These are the actual tickers in the selected theme drilldown.</p><div class="ticker-chip-grid">{selected_theme_chips}</div></div><div class="table-wrap">{header}{''.join(theme_opp_rows)}</tbody></table></div></div><div class="footer">Known: production factor baskets, primary keyword factors, prices, technicals, returns, and factor scores from local Polygon/DuckDB warehouse. Estimated: reversal scores are deterministic composites of basket lag, keyword relevance, and short-term inflection.</div></main></body></html>"""
     divergence_content = f"""<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Top-10 Divergence Monitor</title><style>{css}{theme_css}</style></head>
-<body class="revamp-v3"><header class="site-hero"><div class="hero-inner"><div class="brand-lockup"><div class="brand-mark">∆</div><div class="brand-copy"><h1>Top-10 Divergence Monitor</h1><p>Opportunity ranking versus production factor-basket takeaways</p></div></div><div class="hero-actions"><span class="status-pill live">● Live</span><span class="status-pill">generated {html.escape(now_et.strftime('%Y-%m-%d %H:%M %Z'))}</span><span class="status-pill">divergences {divergence_count}</span><a href="index.html">Cockpit</a><a href="factor-baskets.html">Themes</a><a class="active" href="divergence.html">Divergence</a></div></div></header>
+<body class="revamp-v3"><header class="site-hero"><div class="hero-inner"><div class="brand-lockup"><div class="brand-mark">∆</div><div class="brand-copy"><h1>Top-10 Divergence Monitor</h1><p>Opportunity ranking versus production factor-basket takeaways</p></div></div><div class="hero-actions"><span class="status-pill live">● Live</span><span class="status-pill">generated {html.escape(now_et.strftime('%Y-%m-%d %H:%M %Z'))}</span><span class="status-pill">divergences {divergence_count}</span><a href="index.html">Cockpit</a><a href="factor-baskets.html">Themes</a><a class="active" href="divergence.html">Divergence</a><a href="universe.html">Universe</a></div></div></header>
 <main class="page-shell"><section class="kpi-strip"><article class='kpi-card'><span>Top 10 Checked</span><strong>{len(factor_alignment):,}</strong><em>diversified opportunity list</em></article><article class='kpi-card'><span>Divergence</span><strong>{divergence_count:,}</strong><em>top-10 but avoid/broken basket</em></article><article class='kpi-card'><span>Confirmation</span><strong>{confirmation_count:,}</strong><em>top-10 agrees with factor basket</em></article><article class='kpi-card'><span>Price Cap</span><strong>${price_filter:.0f}</strong><em>same universe as cockpit</em></article><article class='kpi-card'><span>Latest 4H</span><strong>{html.escape(latest_ts[:10])}</strong><em>warehouse timestamp</em></article></section><section class="method-panel"><div><h2>Divergence logic</h2><p>If a diversified top-10 opportunity sits in <b>Broken Momentum / Avoid</b>, this page flags it as <b>DIVERGENCE</b>. Otherwise the top-10 ranking is treated as <b>CONFIRMATION</b> against the current production factor basket.</p></div><div class="method-facts"><span><b>Known</b>Top-10, factor basket, prices, RSI, and wave fields from local warehouse.</span><span><b>Estimated</b>Alignment status is deterministic rule-based classification.</span><span><b>Action</b>Divergence means review risk/reversal case before treating as clean long.</span><span><b>Constraint</b>Not a trade instruction; it is a screen conflict detector.</span></div></section><div class="page-panel"><div class="panel-title"><h3>Top-10 divergence / confirmation cards</h3><span>{divergence_count} divergence · {confirmation_count} confirmation</span></div><div class="factor-alignment-grid">{''.join(alignment_cards)}</div></div><div class="page-panel"><div class="panel-title"><h3>Top-10 vs factor basket audit table</h3><span>ranking conflicts and confirmations</span></div><div class="table-wrap">{alignment_header}{''.join(alignment_rows)}</tbody></table></div></div><div class="footer">Known: top-10 opportunity rankings and production factor baskets from local Polygon/DuckDB scoring. Estimated: DIVERGENCE/CONFIRMATION labels are deterministic screen interpretations; user review remains required.</div></main></body></html>"""
     (DOCS_DIR / "divergence.html").write_text(divergence_content)
     (DOCS_DIR / "factor-baskets.html").write_text(factor_content)
     (DOCS_DIR / "index.html").write_text(content)
+
+    # ── Universe heat-map page ──
+    universe_df = universe_snapshot()
+    universe_rows = []
+    heat_css = """
+.universe-heat{width:100%;border-collapse:collapse;font-size:11px}
+.universe-heat th{position:sticky;top:0;z-index:2;background:#0c1115;color:var(--amber);font-size:10px;text-transform:uppercase;letter-spacing:.06em;padding:8px 6px;border-bottom:1px solid var(--line)}
+.universe-heat td{padding:5px 6px;border-bottom:1px solid rgba(244,239,225,.06);white-space:nowrap}
+.heat-cell{text-align:center;font-weight:900;border-radius:4px;padding:3px 5px;min-width:36px;display:inline-block}
+.heat-hot{background:rgba(66,214,140,.18);color:var(--green)}
+.heat-warm{background:rgba(240,184,62,.14);color:var(--amber)}
+.heat-cool{background:rgba(255,107,107,.12);color:var(--red)}
+.heat-neutral{background:rgba(255,255,255,.04);color:var(--muted)}
+.delta-up{color:var(--green)}
+.delta-down{color:var(--red)}
+.sector-pivot{margin-bottom:24px}
+.sector-pivot h2{color:var(--amber);font-size:16px;text-transform:uppercase;letter-spacing:.08em;margin:0 0 8px;padding:10px 14px;border:1px solid var(--line);border-radius:14px;background:rgba(240,184,62,.06)}
+"""
+
+    if not universe_df.empty:
+        for sector, sdf in universe_df.groupby("sector"):
+            sdf = sdf.sort_values("market_cap", ascending=False)
+            rows = []
+            for _, r in sdf.iterrows():
+                ticker = str(r.get("ticker", ""))
+                company = str(r.get("company", ""))[:30]
+                mcap = f"${float(r.get('market_cap',0))/1e9:.1f}B" if r.get("market_cap") else "—"
+                opp = float(r.get("opportunity_score", 0) or 0)
+                opp_1w = float(r.get("composite_1w_ago", 0) or 0)
+                opp_1m = float(r.get("composite_1m_ago", 0) or 0)
+                ytd = float(r.get("ret_ytd_pct", 0) or 0)
+                delta_1w = opp - opp_1w
+                delta_1m = opp - opp_1m
+
+                def heat_cls(val):
+                    v = float(val) if val and not (isinstance(val, float) and val != val) else 50
+                    if v >= 70: return "heat-hot"
+                    if v >= 55: return "heat-warm"
+                    if v <= 35: return "heat-cool"
+                    return "heat-neutral"
+
+                def delta_span(d):
+                    v = float(d) if d else 0
+                    if v > 3: return f'<span class="delta-up">+{v:.0f}</span>'
+                    if v < -3: return f'<span class="delta-down">{v:.0f}</span>'
+                    return f'<span>{v:.0f}</span>'
+
+                rows.append(
+                    f"<tr>"
+                    f"<td><strong><a class='ticker-link' href='https://finviz.com/stock?t={html.escape(ticker)}' target='_blank' rel='noopener noreferrer'>{html.escape(ticker)}</a></strong><small>{html.escape(company)}</small></td>"
+                    f"<td>{mcap}</td>"
+                    f"<td><span class='heat-cell {heat_cls(opp)}'>{opp:.0f}</span></td>"
+                    f"<td><span class='heat-cell {heat_cls(opp_1w)}'>{opp_1w:.0f}</span> {delta_span(delta_1w)}</td>"
+                    f"<td><span class='heat-cell {heat_cls(opp_1m)}'>{opp_1m:.0f}</span> {delta_span(delta_1m)}</td>"
+                    f"<td>{ytd:+.1f}%</td>"
+                    f"</tr>"
+                )
+            universe_rows.append(
+                f"<div class='sector-pivot'><h2>{html.escape(str(sector))} · {len(rows)} stocks</h2>"
+                f"<div class='table-wrap'><table class='universe-heat'><thead><tr>"
+                f"<th>Ticker</th><th>Mkt Cap</th>"
+                f"<th>Score Now</th><th>Score 1W Ago</th><th>Score 1M Ago</th>"
+                f"<th>YTD Chg</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div></div>"
+            )
+
+    universe_content = f"""<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Full Universe · Equity Screener</title>
+<style>{css}{theme_css}{heat_css}</style></head>
+<body class="revamp-v3"><header class="site-hero"><div class="hero-inner"><div class="brand-lockup"><div class="brand-mark">⊞</div><div class="brand-copy"><h1>Full Universe Monitor</h1><p>All VTI stocks ≥ $5B · composite scores today / 1w ago / 1m ago · YTD change</p></div></div><div class="hero-actions"><span class="status-pill live">● Live</span><span class="status-pill">{len(universe_df):,} stocks</span><a href="index.html">Cockpit</a><a href="factor-baskets.html">Themes</a><a href="divergence.html">Divergence</a><a class="active" href="universe.html">Universe</a></div></div></header>
+<main class="page-shell"><section class="method-panel"><div><h2>Full universe · no price cap</h2><p>Every VTI holding ≥ $5B market cap, grouped by sector and sorted by market cap. Each ticker shows today's composite score, the score from ~1 week ago and ~1 month ago (recomputed from DuckDB snapshots), and the YTD % change. Delta arrows highlight improving (▲ green) or deteriorating (▼ red) setups.</p></div><div class="method-facts"><span><b>Known</b>Composite scores from deterministic warehouse pipeline. Historical values recomputed from DuckDB daily/4h snapshots.</span><span><b>Estimated</b>Historical scores use same formula applied to snapshot data; historical valuation fields (PE, PB) are NaN for snapshots so composite leans on technical factors.</span><span><b>Heat map</b>Green ≥ 70 · Amber 55‑69 · Red ≤ 35 · Grey otherwise.</span></div></section>
+{''.join(universe_rows) if universe_rows else '<p class="note">No universe data available.</p>'}
+<div class="footer">Known: composite opportunity scores from deterministic pipeline; historical values from DuckDB daily/4h snapshots. Estimated: snapshot scores approximate today's formula; historical valuation fields unavailable in snapshots.</div></main></body></html>"""
+
+    (DOCS_DIR / "universe.html").write_text(universe_content)
