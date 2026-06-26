@@ -208,14 +208,14 @@
   {
     "ticker": "KMX",
     "cache_key": "web-v4:KMX:1782417600000:79.23:RSI breakout inflection",
-    "generated_at": "2026-06-26T04:22:51.764214+00:00",
+    "generated_at": "2026-06-26T13:19:46.423785+00:00",
     "input": {
       "ticker": "KMX",
       "company": "CarMax Inc.",
       "sector": "Consumer Discretionary",
       "industry": "Auto & Truck Dealerships",
       "primary_strategy": "RSI breakout inflection",
-      "price": 52.7,
+      "price": 53.4,
       "market_cap_bn": 5.99,
       "opportunity_score": 79.2,
       "rsi_value_score": 64.4,
@@ -239,8 +239,15 @@
       "peg": 0.49,
       "sentiment_score": -0.4
     },
-    "sources": [],
-    "analysis": "- **External commentary**: No reliable external commentary source was extracted by the web-search pipeline for this run; avoid treating this as a catalyst-backed setup.\n- **Why it can work**: Unknown from external commentary. Only deterministic warehouse factors are available.\n- **What can break it**: Unknown from external commentary; fundamental or news-driven risks require manual source review.\n- **Confirming evidence to watch**: Fresh earnings commentary, management guidance, analyst notes, or company filings that validate the setup.\n- **Bottom line**: Source coverage failed, so this card should be read as quantitatively flagged but qualitatively unverified."
+    "sources": [
+      {
+        "title": "CarMax (KMX) Q2 Beat Came With A Warning On Costs And Execution",
+        "url": "https://finance.yahoo.com/markets/stocks/articles/carmax-kmx-q2-beat-came-090650522.html",
+        "excerpt": "[Track your investments for FREE](https://simplywall.st/features/portfolio?utm_medium=finance_user&utm_campaign=portfolio_head_cta&utm_source=yahoo&blueprint=4638554) with Simply Wall St, the portfolio command center trusted by over 7 million individual investors worldwide. * CarMax reported Q2 results that topped Wall Street expectations. * Management highlighted operational inefficiencies and cost pressures weighing on performance. * The company plans to refine retail pricing, vehicle selection, logistics, and its digital customer experience. CarMax, traded as NYSE:KMX, is drawing attention after Q2 results outpaced forecasts while management pointed to friction in the business. The stock last closed at $52.9, with the share price up 30.2% over the past month and 34.6% year to date, but down 20.7% over 1 year, 37.3% over 3 years, and 59.5% over 5 years. That mix of recent strength and longer term weakness gives extra weight to new comments about the health of the underlying operation. For investors, the key watchpoints now sit beyond the headline numbers, in how CarMax tackles customer journey issues and efficiency gaps. Management's focus on retail prices, inventory mix, logistics, and digital tools could influence the quality and durability of future results, depending on how effectively these changes are executed and received by customers. Stay updated on the most important news stories for [CarMax](https://www.simplywall.st//company/id/a09313aa-a2cb-42ef- bbf8-927df1f9505d/valuation?utm_medium=finance_user&utm_campaign=news_stay_updated_cta&utm_source=yahoo) by adding it to your [watchlist](https://simplywall.st/features/stock- watchlist?utm_medium=finance_user&utm_campaign=news_stay_updated_cta&utm_source=yahoo&blueprint=4638554) or [portfolio](https://simplywall",
+        "search_snippet": "Simply Wall St."
+      }
+    ],
+    "analysis": "- **External commentary:** [1] reports CarMax beat Q2 expectations but management warned of operational inefficiencies and cost pressures. The company plans to refine retail pricing, vehicle selection, logistics, and digital customer experience. No source provides bullish analyst upgrades, insider buying, or industry tailwinds. Unknown: whether these planned changes are credible or merely reactive.\n\n- **Why it can work:** The RSI acceleration (delta +6.2 from a prior -3.0 average) and 1-month return (+29.7%) suggest momentum is building, possibly reflecting the Q2 beat. A low PEG (0.49) and price-to-book (1.14) imply valuation is not stretched if earnings stabilize. The short float (10.7%) could fuel a squeeze if positive catalysts emerge. Unknown: whether the operational fixes will actually improve margins or revenue growth.\n\n- **What can break it:** Management\u2019s own warning on costs and execution [1] directly contradicts the Q2 headline beat. The stock is down 20.7% over 1 year and 59.5% over 5 years, indicating structural headwinds. Sentiment score is negative (-0.4). The forward P/E (17.13) is not obviously cheap for a challenged retailer. Unknown: whether cost pressures are cyclical or permanent.\n\n- **Confirming evidence to watch:** Look for subsequent quarterly results showing improved gross margins or same-store sales, or management commentary that execution gaps are closing. Also watch for insider buying or analyst upgrades. Unknown: any specific catalyst timeline.\n\n- **Bottom line:** The setup is a momentum-driven bounce on a Q2 beat, but management\u2019s own caution [1] undermines confidence. Without evidence of operational improvement, the long case relies on continued short-covering and hope. No trade recommendation."
   },
   {
     "ticker": "TGTX",

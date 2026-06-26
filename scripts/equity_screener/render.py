@@ -523,7 +523,7 @@ def render_dashboard(df: pd.DataFrame, analyses: list[dict], price_filter: float
 
                 rows.append(
                     f"<tr>"
-                    f"<td><strong><a class='ticker-link' href='https://finviz.com/stock?t={html.escape(ticker)}' target='_blank' rel='noopener noreferrer'>{html.escape(ticker)}</a></strong><small>{html.escape(company)}</small></td>"
+                    f"<td><strong>{ticker_link(ticker)}</strong><small>{html.escape(company)}</small></td>"
                     f"<td>{mcap}</td>"
                     f"<td><span class='heat-cell {heat_cls(opp)}'>{opp:.0f}</span></td>"
                     f"<td><span class='heat-cell {heat_cls(opp_1w)}'>{opp_1w:.0f}</span> {delta_span(delta_1w)}</td>"
