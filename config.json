@@ -1,0 +1,6 @@
+{
+  "max_turns": 90,
+  "auto_compress_pct": 80,
+  "retry_max": 3,
+  "specialized_skills": []
+}
