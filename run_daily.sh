@@ -4,6 +4,7 @@
 # 2. Builds dashboard
 # 3. Pushes to GitHub Pages
 set -euo pipefail
+export PYTHONPATH="/home/nima/equity-screener/scripts${PYTHONPATH:+:$PYTHONPATH}"
 
 LOG_DIR="/home/nima/market-data/logs"
 mkdir -p "$LOG_DIR"
@@ -18,42 +19,38 @@ echo "  Run: $RUN_ID"
 echo "  $(date -Is)"
 echo "═══════════════════════════════════════"
 
-# Step 1: Refresh warehouse data (latest 1h/4h data points)
-echo ""
-echo "── Step 1: Warehouse quick refresh ──"
-if /usr/bin/bash /home/nima/market-data/scripts/quick_refresh.sh; then
-    echo "   ✅ Warehouse refresh complete"
-else
-    rc=$?
-    echo "   ⚠️  Warehouse refresh failed (exit $rc) — building with existing data"
-fi
+run_quick_refresh() {
+    local attempt="$1"
+    echo ""
+    echo "── Step 1.${attempt}: Warehouse quick refresh ──"
+    if /usr/bin/bash /home/nima/market-data/scripts/quick_refresh.sh; then
+        echo "   ✅ Warehouse refresh complete (${attempt})"
+        return 0
+    else
+        local rc=$?
+        echo "   ⚠️  Warehouse refresh failed (${attempt}, exit $rc) — freshness guard will decide whether build can continue"
+        return "$rc"
+    fi
+}
 
-# Step 2: Freshness guard
+# Step 1: Refresh warehouse data (latest 1h/4h data points)
+run_quick_refresh "initial" || true
+
+# Step 2: Freshness guard. If 4h pricing data is >50h stale, retry the
+# warehouse refresh once before accepting weekend data or refusing the build.
 echo ""
 echo "── Step 2: Data freshness check ──"
-/usr/bin/python3 -c "
-import duckdb, sys, datetime
-db = duckdb.connect('/home/nima/market-data/market_data.duckdb', read_only=True)
-ti_max = db.execute(\"SELECT max(to_timestamp(CAST(timestamp/1000 AS BIGINT))) FROM technical_indicators WHERE timeframe='4h'\").fetchone()
-if ti_max[0] is None:
-    print('FATAL: no 4h RSI data')
-    sys.exit(2)
-# DuckDB's to_timestamp() returns a timezone-aware timestamp in the local TZ.
-# Do NOT use replace(tzinfo=UTC): that relabels 16:00 ET as 16:00 UTC and
-# overstates age by four hours.
-latest_utc = ti_max[0].astimezone(datetime.timezone.utc) if ti_max[0].tzinfo else ti_max[0].replace(tzinfo=datetime.timezone.utc)
-now_utc = datetime.datetime.now(datetime.timezone.utc)
-age_hours = (now_utc - latest_utc).total_seconds() / 3600
-# This cron is intentionally daily, but markets are closed over the weekend.
-# Friday's 4h RSI can be ~53h old by the Sunday 20:30 ET run; that is expected,
-# not a pipeline failure. Keep the strict 30h guard on weekdays.
-threshold_hours = 80 if now_utc.weekday() in (5, 6) else 30
-if age_hours > threshold_hours:
-    print(f'REFUSING: 4h RSI data is {age_hours:.0f}h old > {threshold_hours}h threshold (latest={latest_utc.isoformat()})')
-    sys.exit(2)
-print(f'OK: 4h RSI data is {age_hours:.0f}h old <= {threshold_hours}h threshold (latest={latest_utc.isoformat()})')
-db.close()
-" || exit $?
+set +e
+/usr/bin/python3 -m equity_screener.freshness
+fresh_rc=$?
+set -e
+if [[ "$fresh_rc" -eq 75 ]]; then
+    echo "   ↻ 4h pricing data exceeded 50h; re-attempting market-data warehouse refresh"
+    run_quick_refresh "stale-retry" || true
+    /usr/bin/python3 -m equity_screener.freshness --refresh-retried || exit $?
+elif [[ "$fresh_rc" -ne 0 ]]; then
+    exit "$fresh_rc"
+fi
 
 # Step 3: Build + deploy dashboard
 echo ""
